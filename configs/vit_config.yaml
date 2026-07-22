@@ -1,0 +1,55 @@
+# ViT + Transformer OCR Configuration
+
+# General
+seed: 42
+device: "auto"  # auto | cuda | mps | cpu
+output_dir: "./checkpoints"
+log_dir: "./logs"
+
+# Dataset (HuggingFace: ducto489/ocr_datasets)
+dataset:
+  name: "ducto489/ocr_datasets"
+  cache_dir: "./data/sample"
+  csv_file: "./data/sample/sample_data.csv"
+  img_dir: "./data/sample"
+  image_column: "image"
+  text_column: "text"
+  image_size: [32, 256]  # [height, width]
+  max_label_length: 64
+  batch_size: 32
+  num_workers: 4
+  special_tokens:
+    pad: "<pad>"
+    sos: "<sos>"
+    eos: "<eos>"
+    unk: "<unk>"
+
+# Model Architecture: Hybrid ViT Encoder (Conv Stem + ViT) + Transformer Decoder
+model:
+  name: "vit_transformer"
+  encoder:
+    type: "hybrid_vit"
+    conv_stem:
+      in_channels: 3
+      stem_channels: [64, 128, 384]
+    embed_dim: 384
+    depth: 6
+    num_heads: 6
+  decoder:
+    d_model: 384
+    nhead: 6
+    num_layers: 4
+    dim_feedforward: 1536
+    dropout: 0.1
+
+# Training Hyperparameters
+train:
+  epochs: 50
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 3
+  label_smoothing: 0.1
+  gradient_clip_val: 1.0
+  eval_interval: 1

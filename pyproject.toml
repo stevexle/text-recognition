@@ -1,0 +1,29 @@
+[project]
+name = "text-recognition"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "steve", email = "tienlm@infoplusvn.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "albumentations>=2.0.8",
+    "datasets>=5.0.0",
+    "editdistance>=0.8.1",
+    "pillow>=12.3.0",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "torch>=2.13.0",
+    "torchvision>=0.28.0",
+    "tqdm>=4.69.0",
+    "transformers>=5.14.1",
+    "wandb>=0.28.1",
+]
+
+[project.scripts]
+text-recognition = "text_recognition:main"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"

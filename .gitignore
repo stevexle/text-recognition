@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments & uv
+.venv/
+.uv/
+
+# Datasets, Checkpoints & Logs
+data/
+checkpoints/
+logs/
+wandb/
+.ds_store
+.DS_Store
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.parquet
+*.csv
