@@ -11,7 +11,7 @@ wheels/
 .uv/
 
 # Datasets, Checkpoints & Logs
-data/
+/data/
 checkpoints/
 logs/
 wandb/
