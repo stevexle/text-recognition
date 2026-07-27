@@ -19,7 +19,7 @@ dataset:
   train_split: 0.80
   val_split: 0.10
   test_split: 0.10
-  batch_size: 32
+  batch_size: 256
   num_workers: 0
   special_tokens:
     pad: "<pad>"
@@ -57,3 +57,4 @@ train:
   label_smoothing: 0.1
   gradient_clip_val: 1.0
   eval_interval: 1
+  use_amp: true

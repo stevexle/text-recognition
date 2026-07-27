@@ -72,6 +72,9 @@ class Trainer:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.grad_clip = config["train"].get("gradient_clip_val", 1.0)
+        self.use_amp = config["train"].get("use_amp", True) and (self.device.type == "cuda")
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
         self.best_cer = float("inf")
         self.best_acc = 0.0
 
@@ -104,22 +107,26 @@ class Trainer:
 
             self.optimizer.zero_grad()
 
-            # Forward pass: [B, L, vocab_size]
-            logits = self.model(images, targets_input)
+            # Forward pass with AMP autocast: [B, L, vocab_size]
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                logits = self.model(images, targets_input)
 
-            # Reshape for Loss computation: [B * L, vocab_size] vs [B * L]
-            vocab_size = logits.size(-1)
-            loss = self.criterion(
-                logits.view(-1, vocab_size),
-                targets_real.reshape(-1)
-            )
+                # Reshape for Loss computation: [B * L, vocab_size] vs [B * L]
+                vocab_size = logits.size(-1)
+                loss = self.criterion(
+                    logits.view(-1, vocab_size),
+                    targets_real.reshape(-1)
+                )
 
-            # Backward pass & Gradient clipping
-            loss.backward()
+            # Backward pass with AMP GradScaler & Gradient clipping
+            self.scaler.scale(loss).backward()
+
             if self.grad_clip > 0:
+                self.scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             total_loss += loss.item()
 
             current_loss = loss.item()

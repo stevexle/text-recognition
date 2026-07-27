@@ -67,11 +67,13 @@ def build_dataloader(
     num_workers: int = 4,
     pad_token_id: int = 0
 ) -> DataLoader:
-    """Construct DataLoader instance with custom collate_fn."""
+    """Construct DataLoader instance with custom collate_fn and pinned memory."""
+    use_pin_memory = torch.cuda.is_available()
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        pin_memory=use_pin_memory,
         collate_fn=Seq2SeqCollate(pad_token_id=pad_token_id)
     )
