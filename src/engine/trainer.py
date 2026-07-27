@@ -254,11 +254,11 @@ class Trainer:
                     },
                     best_path
                 )
-                self.logger.info(f"🎯 Saved new best model to {best_path} (CER: {val_cer:.4f})")
+                self.logger.info(f"Saved new best model to {best_path} (CER: {val_cer:.4f})")
             else:
                 self.patience_counter += 1
                 self.logger.info(
-                    f"⏳ No CER improvement for {self.patience_counter}/{self.patience} consecutive epochs. "
+                    f"No CER improvement for {self.patience_counter}/{self.patience} consecutive epochs. "
                     f"Best CER so far: {self.best_cer:.4f}"
                 )
 
