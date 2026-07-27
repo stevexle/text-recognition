@@ -29,6 +29,7 @@ class OCRDataset(Dataset):
         tokenizer: Tokenizer = None,
         transform=None,
         image_size: tuple[int, int] = (32, 256),
+        max_label_length: int = 254,
         is_train: bool = True
     ):
         """
@@ -38,11 +39,13 @@ class OCRDataset(Dataset):
             tokenizer: Initialized Tokenizer instance.
             transform: Optional torchvision transform pipeline.
             image_size: Target tuple (Height, Width) for image resizing.
+            max_label_length: Maximum allowed label token sequence length.
             is_train: Training mode flag.
         """
         self.tokenizer = tokenizer
         self.transform = transform or get_ocr_transforms(image_size=image_size, is_train=is_train)
         self.img_dir = img_dir
+        self.max_label_length = max_label_length
 
         if isinstance(data_source, str):
             text_col = "text"
@@ -115,8 +118,10 @@ class OCRDataset(Dataset):
             # Apply torchvision transforms -> Tensor [3, H, W]
             image_tensor = self.transform(image)
 
-            # Encode text string to token IDs
+            # Encode text string to token IDs and dynamically restrict to max_label_length
             label_ids = self.tokenizer.encode(raw_text, add_special_tokens=True)
+            if len(label_ids) > self.max_label_length:
+                label_ids = label_ids[:self.max_label_length]
 
             return {
                 "image": image_tensor,

@@ -60,18 +60,10 @@ class TransformerDecoder(nn.Module):
 
     def generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
         """
-        Generate a causal square mask for target sequence to prevent attending to future tokens.
-        
-        Args:
-            sz: Sequence length L
-            device: Compute device
-            
-        Returns:
-            Float Causal Mask tensor of shape [L, L] with -inf on upper triangle.
+        Generate a causal square boolean mask for target sequence to prevent attending to future tokens.
+        Compatible with PyTorch FP32, FP16 AMP, and BF16.
         """
-        mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
+        return torch.triu(torch.ones(sz, sz, device=device, dtype=torch.bool), diagonal=1)
 
     def forward(
         self,
