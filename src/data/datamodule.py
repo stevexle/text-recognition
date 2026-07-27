@@ -51,6 +51,15 @@ def collate_fn_seq2seq(batch: list[dict], pad_token_id: int = 0) -> dict:
     }
 
 
+class Seq2SeqCollate:
+    """Picklable Collate Callable Class for PyTorch DataLoader with multiprocessing workers."""
+    def __init__(self, pad_token_id: int = 0):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: list[dict]) -> dict:
+        return collate_fn_seq2seq(batch, pad_token_id=self.pad_token_id)
+
+
 def build_dataloader(
     dataset: OCRDataset,
     batch_size: int = 32,
@@ -64,5 +73,5 @@ def build_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_seq2seq(b, pad_token_id=pad_token_id)
+        collate_fn=Seq2SeqCollate(pad_token_id=pad_token_id)
     )

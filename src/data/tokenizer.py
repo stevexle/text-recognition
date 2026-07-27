@@ -102,3 +102,18 @@ class Tokenizer:
     @property
     def vocab_size(self) -> int:
         return len(self.id2char)
+
+
+if __name__ == "__main__":
+    # Test the tokenizer
+    tokenizer = Tokenizer()
+    dataset_texts = dataset_texts = [
+        "Anh túc",
+        "15:02:36",
+        "CÁC CHIẾC SWIFTSURE",
+        None
+    ]
+    tokenizer.build_vocab_from_texts(dataset_texts)
+    print(tokenizer.char2id)
+
+    

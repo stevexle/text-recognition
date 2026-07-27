@@ -9,13 +9,16 @@ log_dir: "./logs"
 # Dataset (HuggingFace: ducto489/ocr_datasets)
 dataset:
   name: "ducto489/ocr_datasets"
-  cache_dir: "./data/sample"
-  csv_file: "./data/sample/sample_data.csv"
-  img_dir: "./data/sample"
+  cache_dir: "./data/raw"
+  csv_file: "./data/raw/data.csv"
+  img_dir: "./data/raw"
   image_column: "image"
   text_column: "text"
   image_size: [32, 256]  # [height, width]
   max_label_length: 64
+  train_split: 0.80
+  val_split: 0.10
+  test_split: 0.10
   batch_size: 32
   num_workers: 4
   special_tokens:
@@ -41,6 +44,7 @@ model:
     num_layers: 4
     dim_feedforward: 1536
     dropout: 0.1
+    max_seq_len: 256
 
 # Training Hyperparameters
 train:

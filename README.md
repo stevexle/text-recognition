@@ -6,6 +6,56 @@ The repository provides a clean, extensible architecture supporting multiple sta
 
 ---
 
+## ⚡ Quick Start & Environment Setup
+
+### 1. Synchronize Environment & Install Package
+Using native `uv` command to install all dependencies and set up the project package in editable mode:
+
+```bash
+# Sync dependencies and build project package
+uv sync
+```
+
+### 2. Download Full Dataset (For GPU Server Training)
+To download and export the full HuggingFace dataset into `./data/raw` with local images and `data.csv` metadata:
+
+```bash
+uv run python scripts/download_data.py --output-dir ./data/raw
+```
+
+### 3. Run Module Verification Tests
+Since the project is installed as an editable package (`text-recognition`), all modules can be executed directly from anywhere:
+
+```bash
+# Test Data Pipeline
+uv run python src/data/datamodule.py
+
+# Test Model Architecture (Hybrid ViT Encoder & Transformer Decoder)
+uv run python src/models/vit_encoder.py
+uv run python src/models/transformer_decoder.py
+uv run python src/models/vit_transformer.py
+
+# Test Metrics & Utilities
+uv run python src/metrics.py
+uv run python src/utils.py
+```
+
+### 4. Start Model Training
+To start training the Hybrid ViT + Transformer model (automatically splits dataset into 80% Train, 10% Validation, and 10% Test):
+
+```bash
+uv run python scripts/train.py --config configs/vit_config.yaml
+```
+
+### 5. Evaluate Trained Model on Test Set
+To evaluate the best trained model checkpoint on the unseen Test set split:
+
+```bash
+uv run python scripts/evaluate.py --checkpoint checkpoints/best_model.pt --test-csv checkpoints/test_split.csv
+```
+
+---
+
 ## 🏗️ Supported Model Architectures
 
 ### 1. Hybrid ViT + Transformer Decoder (Default)
@@ -40,6 +90,7 @@ text_recognition/
 │   └── vit_ocr_architecture_2d.png
 ├── scripts/               # Command-line entrypoint scripts
 │   ├── download_data.py   # Utility script to download HuggingFace datasets
+│   ├── evaluate.py        # Independent evaluation script for Test set
 │   └── train.py           # Training execution script
 ├── src/                   # Core package source code
 │   ├── data/              # Tokenizer, Dataset wrapper, DataLoader, Transforms
@@ -52,10 +103,10 @@ text_recognition/
 │   ├── models/            # Modular Model implementations (Encoders, Decoders)
 │   │   ├── vit_encoder.py
 │   │   ├── transformer_decoder.py
-│   │   └── ocr_model.py
+│   │   └── vit_transformer.py
 │   ├── metrics.py         # Evaluation metrics (CER, WER, Exact Match Accuracy)
 │   └── utils.py           # Utility functions (Config loader, Logger, Checkpoint)
-├── pyproject.toml         # Dependency specifications
+├── pyproject.toml         # Package & dependency specifications
 └── README.md
 ```
 
