@@ -10,6 +10,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.data.tokenizer import Tokenizer
 from src.metrics import compute_cer, compute_wer, compute_accuracy
@@ -87,8 +88,16 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         start_time = time.time()
+        total_epochs = self.config["train"]["epochs"]
 
-        for batch_idx, batch in enumerate(self.train_loader):
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"Epoch [{epoch:02d}/{total_epochs:02d}] Train",
+            leave=True,
+            dynamic_ncols=True
+        )
+
+        for batch_idx, batch in enumerate(pbar):
             images = batch["images"].to(self.device)
             targets_input = batch["targets_input"].to(self.device)
             targets_real = batch["targets_real"].to(self.device)
@@ -113,12 +122,22 @@ class Trainer:
             self.optimizer.step()
             total_loss += loss.item()
 
+            current_loss = loss.item()
+            running_avg = total_loss / (batch_idx + 1)
+            current_lr = self.optimizer.param_groups[0]["lr"]
+
+            pbar.set_postfix({
+                "loss": f"{current_loss:.4f}",
+                "avg_loss": f"{running_avg:.4f}",
+                "lr": f"{current_lr:.6f}"
+            })
+
         avg_loss = total_loss / len(self.train_loader)
         elapsed = time.time() - start_time
         current_lr = self.optimizer.param_groups[0]["lr"]
 
         self.logger.info(
-            f"Epoch [{epoch:02d}/{self.config['train']['epochs']:02d}] "
+            f"Epoch [{epoch:02d}/{total_epochs:02d}] "
             f"Train Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | Time: {elapsed:.2f}s"
         )
         return avg_loss
