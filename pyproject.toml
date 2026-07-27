@@ -10,22 +10,31 @@ readme = "README.md"
 authors = [
     { name = "steve", email = "Ltien540@gmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
-    "albumentations>=2.0.8",
-    "datasets>=5.0.0",
-    "editdistance>=0.8.1",
+    "albumentations>=1.4.0",
+    "datasets>=2.18.0",
+    "editdistance>=0.8.0",
     "pandas>=2.0.0",
-    "pillow>=12.3.0",
-    "pyyaml>=6.0.3",
-    "rich>=15.0.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.0",
+    "rich>=13.0.0",
     "scikit-learn>=1.4.0",
-    "torch>=2.13.0",
-    "torchvision>=0.28.0",
-    "tqdm>=4.69.0",
-    "transformers>=5.14.1",
-    "wandb>=0.28.1",
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.38.0",
+    "wandb>=0.16.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
