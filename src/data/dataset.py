@@ -1,6 +1,7 @@
 """
 PyTorch Dataset wrapper for OCR text recognition.
 Supports loading from both local CSV files / DataFrames and HuggingFace Dataset splits directly.
+Includes automatic fallback for corrupted or missing samples in large-scale datasets.
 """
 
 import os
@@ -18,6 +19,7 @@ class OCRDataset(Dataset):
     """
     Modular OCR Dataset wrapper supporting local CSV metadata, DataFrames,
     and direct HuggingFace Dataset splits (memory-mapped Arrow format).
+    Includes automatic fallback to next sample if corrupt image is encountered.
     """
 
     def __init__(
@@ -61,65 +63,66 @@ class OCRDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx: int) -> dict:
-        if self.hf_dataset is not None:
-            item = self.hf_dataset[idx]
-            
-            # Robust text key extraction across HF formats ('txt', 'text', 'label', 'transcription')
-            raw_text = ""
-            for key in ["txt", "text", "label", "transcription", "ground_truth"]:
-                if key in item and item[key] is not None:
-                    raw_text = str(item[key]).strip()
-                    break
+        try:
+            if self.hf_dataset is not None:
+                item = self.hf_dataset[idx]
+                
+                # Robust text key extraction across HF formats ('txt', 'text', 'label', 'transcription')
+                raw_text = ""
+                for key in ["txt", "text", "label", "transcription", "ground_truth"]:
+                    if key in item and item[key] is not None:
+                        raw_text = str(item[key]).strip()
+                        break
 
-            # Robust image key extraction ('jpg', 'image', 'png', 'img')
-            raw_image = None
-            for key in ["jpg", "image", "png", "img", "jpeg"]:
-                if key in item and item[key] is not None:
-                    raw_image = item[key]
-                    break
+                # Robust image key extraction ('jpg', 'image', 'png', 'img')
+                raw_image = None
+                for key in ["jpg", "image", "png", "img", "jpeg"]:
+                    if key in item and item[key] is not None:
+                        raw_image = item[key]
+                        break
 
-            if raw_image is None:
-                raise ValueError(f"No valid image data found at index {idx} in HuggingFace dataset.")
+                # Option A Fallback: If image is missing, skip to next index
+                if raw_image is None or raw_text == "":
+                    return self.__getitem__((idx + 1) % len(self))
 
-            if isinstance(raw_image, bytes):
-                image = Image.open(io.BytesIO(raw_image))
-            elif isinstance(raw_image, dict) and "bytes" in raw_image:
-                image = Image.open(io.BytesIO(raw_image["bytes"]))
+                if isinstance(raw_image, bytes):
+                    image = Image.open(io.BytesIO(raw_image))
+                elif isinstance(raw_image, dict) and "bytes" in raw_image:
+                    image = Image.open(io.BytesIO(raw_image["bytes"]))
+                else:
+                    image = raw_image
             else:
-                image = raw_image
-        else:
-            row = self.df.iloc[idx]
-            raw_text = str(row["text"]).strip()
-            
-            # Retrieve relative image path column ('image' or 'image_path')
-            rel_img_path = str(row.get("image", row.get("image_path", "")))
-            
-            if self.img_dir:
-                full_img_path = os.path.join(self.img_dir, rel_img_path)
-            else:
-                full_img_path = rel_path
+                row = self.df.iloc[idx]
+                raw_text = str(row["text"]).strip()
+                
+                # Retrieve relative image path column ('image' or 'image_path')
+                rel_img_path = str(row.get("image", row.get("image_path", "")))
+                
+                if self.img_dir:
+                    full_img_path = os.path.join(self.img_dir, rel_img_path)
+                else:
+                    full_img_path = rel_img_path
 
-            if not os.path.exists(full_img_path):
-                # Fallback to current working directory
-                full_img_path = os.path.abspath(rel_img_path)
+                if not os.path.exists(full_img_path):
+                    full_img_path = os.path.abspath(rel_img_path)
 
-            try:
                 image = Image.open(full_img_path)
-            except Exception as e:
-                raise FileNotFoundError(f"Failed to load image at: {full_img_path}. Error: {e}")
 
-        # Ensure RGB format
-        if hasattr(image, "mode") and image.mode != "RGB":
-            image = image.convert("RGB")
+            # Ensure RGB format
+            if hasattr(image, "mode") and image.mode != "RGB":
+                image = image.convert("RGB")
 
-        # Apply torchvision transforms -> Tensor [3, H, W]
-        image_tensor = self.transform(image)
+            # Apply torchvision transforms -> Tensor [3, H, W]
+            image_tensor = self.transform(image)
 
-        # Encode text string to token IDs
-        label_ids = self.tokenizer.encode(raw_text, add_special_tokens=True)
+            # Encode text string to token IDs
+            label_ids = self.tokenizer.encode(raw_text, add_special_tokens=True)
 
-        return {
-            "image": image_tensor,
-            "label_ids": torch.tensor(label_ids, dtype=torch.long),
-            "text": raw_text
-        }
+            return {
+                "image": image_tensor,
+                "label_ids": torch.tensor(label_ids, dtype=torch.long),
+                "text": raw_text
+            }
+        except Exception:
+            # Option A Fallback: On any load/convert error, gracefully skip to next sample index
+            return self.__getitem__((idx + 1) % len(self))
