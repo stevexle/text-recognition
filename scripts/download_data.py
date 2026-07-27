@@ -117,7 +117,7 @@ def download_and_export_dataset(
                     csv_file.flush()
 
     print("\n==================================================")
-    print(f"✅ Full dataset successfully exported to: {output_dir}")
+    print(f"Full dataset successfully exported to: {output_dir}")
     print(f"   Total valid samples exported: {valid_counter:,}")
     print(f"   Images saved in partitions:   {images_base_dir}")
     print(f"   CSV Metadata:                 {csv_path}")
