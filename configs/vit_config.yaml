@@ -20,7 +20,7 @@ dataset:
   val_split: 0.10
   test_split: 0.10
   batch_size: 32
-  num_workers: 4
+  num_workers: 0
   special_tokens:
     pad: "<pad>"
     sos: "<sos>"
