@@ -40,13 +40,19 @@ def download_and_export_dataset(
 
     img_counter = 0
     for split in split_keys:
-        print(f"Processing split '{split}' with {len(hf_dataset[split])} samples...")
-        for item in tqdm(hf_dataset[split], desc=f"Exporting {split}"):
-            # Handle PIL image and text label
+        split_data = hf_dataset[split]
+        print(f"Processing split '{split}' ({len(split_data)} samples) | Features: {split_data.column_names}")
+        for item in tqdm(split_data, desc=f"Exporting {split}"):
             image = item.get("image")
-            text = item.get("text", item.get("label", ""))
+            
+            # Robust text key extraction across different HF OCR dataset formats
+            text = None
+            for key in ["text", "label", "transcription", "ground_truth", "caption", "words"]:
+                if key in item and item[key] is not None and str(item[key]).strip() != "":
+                    text = str(item[key]).strip()
+                    break
 
-            if image is None or text is None or str(text).strip() == "":
+            if image is None or text is None:
                 continue
 
             # Save PIL image file locally
@@ -54,7 +60,7 @@ def download_and_export_dataset(
             img_path = os.path.join(img_dir, img_filename)
             
             # Convert RGBA/Palette to RGB if necessary
-            if image.mode != "RGB":
+            if hasattr(image, "mode") and image.mode != "RGB":
                 image = image.convert("RGB")
             image.save(img_path, format="JPEG", quality=95)
 
@@ -62,7 +68,7 @@ def download_and_export_dataset(
             rel_img_path = os.path.join("images", img_filename)
             records.append({
                 "image": rel_img_path,
-                "text": str(text).strip()
+                "text": text
             })
             img_counter += 1
 
