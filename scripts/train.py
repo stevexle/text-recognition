@@ -95,6 +95,7 @@ def main():
 
         train_dataset = OCRDataset(train_df, img_dir, tokenizer, image_size=image_size, is_train=True)
         val_dataset = OCRDataset(val_df, img_dir, tokenizer, image_size=image_size, is_train=False)
+        shuffle_train = True
 
     else:
         logger.info(
@@ -139,8 +140,6 @@ def main():
         # PyArrow memory-mapped datasets deadlock when num_workers > 0
         num_workers = 0
         shuffle_train = False
-    else:
-        shuffle_train = True
 
     # 4. Instantiate DataLoaders
     train_loader = build_dataloader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
