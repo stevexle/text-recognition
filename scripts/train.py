@@ -130,14 +130,20 @@ def main():
             f"Train: {len(train_data):,} samples | Val/Test: {len(val_data):,} samples"
         )
 
+        logger.info("Pre-shuffling HuggingFace Arrow dataset efficiently at C++ level...")
+        train_data = train_data.shuffle(seed=seed)
+
         train_dataset = OCRDataset(train_data, img_dir=None, tokenizer=tokenizer, image_size=image_size, is_train=True)
         val_dataset = OCRDataset(val_data, img_dir=None, tokenizer=tokenizer, image_size=image_size, is_train=False)
 
         # PyArrow memory-mapped datasets deadlock when num_workers > 0
         num_workers = 0
+        shuffle_train = False
+    else:
+        shuffle_train = True
 
     # 4. Instantiate DataLoaders
-    train_loader = build_dataloader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    train_loader = build_dataloader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
     val_loader = build_dataloader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # 5. Instantiate Model Architecture (Hybrid ViT Encoder + Transformer Decoder)
