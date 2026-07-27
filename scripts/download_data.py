@@ -4,9 +4,11 @@ and export image-text pairs to local output directory with data.csv metadata.
 """
 
 import os
+import io
 import argparse
 import pandas as pd
 from tqdm import tqdm
+from PIL import Image
 from datasets import load_dataset
 
 
@@ -41,36 +43,55 @@ def download_and_export_dataset(
     img_counter = 0
     for split in split_keys:
         split_data = hf_dataset[split]
-        print(f"Processing split '{split}' ({len(split_data)} samples) | Features: {split_data.column_names}")
+        print(f"Processing split '{split}' ({len(split_data):,} samples) | Features: {split_data.column_names}")
         for item in tqdm(split_data, desc=f"Exporting {split}"):
-            image = item.get("image")
-            
-            # Robust text key extraction across different HF OCR dataset formats
+            # 1. Robust image extraction across HF formats ('image', 'jpg', 'png', 'img', 'jpeg')
+            raw_image = None
+            for key in ["image", "jpg", "png", "img", "jpeg"]:
+                if key in item and item[key] is not None:
+                    raw_image = item[key]
+                    break
+
+            # 2. Robust text label extraction across HF formats ('text', 'txt', 'label', 'transcription', 'ground_truth')
             text = None
-            for key in ["text", "label", "transcription", "ground_truth", "caption", "words"]:
+            for key in ["text", "txt", "label", "transcription", "ground_truth", "caption", "words"]:
                 if key in item and item[key] is not None and str(item[key]).strip() != "":
                     text = str(item[key]).strip()
                     break
 
-            if image is None or text is None:
+            if raw_image is None or text is None:
                 continue
 
-            # Save PIL image file locally
-            img_filename = f"img_{img_counter:07d}.jpg"
-            img_path = os.path.join(img_dir, img_filename)
-            
-            # Convert RGBA/Palette to RGB if necessary
-            if hasattr(image, "mode") and image.mode != "RGB":
-                image = image.convert("RGB")
-            image.save(img_path, format="JPEG", quality=95)
+            # Convert bytes to PIL Image if necessary (WebDataset format)
+            try:
+                if isinstance(raw_image, bytes):
+                    image = Image.open(io.BytesIO(raw_image))
+                elif isinstance(raw_image, dict) and "bytes" in raw_image:
+                    image = Image.open(io.BytesIO(raw_image["bytes"]))
+                else:
+                    image = raw_image
 
-            # Store relative image path for CSV
-            rel_img_path = os.path.join("images", img_filename)
-            records.append({
-                "image": rel_img_path,
-                "text": text
-            })
-            img_counter += 1
+                if not isinstance(image, Image.Image):
+                    continue
+
+                # Save PIL image file locally as JPEG
+                img_filename = f"img_{img_counter:07d}.jpg"
+                img_path = os.path.join(img_dir, img_filename)
+                
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                image.save(img_path, format="JPEG", quality=95)
+
+                # Store relative image path for CSV metadata
+                rel_img_path = os.path.join("images", img_filename)
+                records.append({
+                    "image": rel_img_path,
+                    "text": text
+                })
+                img_counter += 1
+            except Exception as e:
+                # Skip invalid or corrupt images silently
+                continue
 
     # Save CSV metadata
     csv_path = os.path.join(output_dir, csv_name)
@@ -78,7 +99,7 @@ def download_and_export_dataset(
     df.to_csv(csv_path, index=False)
 
     print("\n==================================================")
-    print(f"Full dataset successfully exported to: {output_dir}")
+    print(f"✅ Full dataset successfully exported to: {output_dir}")
     print(f"   Total valid samples: {len(df):,}")
     print(f"   Images saved in:     {img_dir}")
     print(f"   CSV Metadata:        {csv_path}")
