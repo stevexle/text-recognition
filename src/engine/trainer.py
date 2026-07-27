@@ -77,6 +77,8 @@ class Trainer:
 
         self.best_cer = float("inf")
         self.best_acc = 0.0
+        self.patience = config["train"].get("early_stopping_patience", 5)
+        self.patience_counter = 0
 
     def train_epoch(self, epoch: int) -> float:
         """
@@ -239,6 +241,7 @@ class Trainer:
             if is_best:
                 self.best_cer = val_cer
                 self.best_acc = val_metrics["acc"]
+                self.patience_counter = 0
                 best_path = os.path.join(self.output_dir, "best_model.pt")
                 save_checkpoint(
                     {
@@ -252,6 +255,20 @@ class Trainer:
                     best_path
                 )
                 self.logger.info(f"🎯 Saved new best model to {best_path} (CER: {val_cer:.4f})")
+            else:
+                self.patience_counter += 1
+                self.logger.info(
+                    f"⏳ No CER improvement for {self.patience_counter}/{self.patience} consecutive epochs. "
+                    f"Best CER so far: {self.best_cer:.4f}"
+                )
+
+            # Check Early Stopping Trigger
+            if self.patience_counter >= self.patience:
+                self.logger.info(
+                    f"Early Stopping Triggered! Model stopped after {self.patience} epochs without CER improvement."
+                )
+                self.logger.info(f"Final Best Validation CER: {self.best_cer:.4f} | Accuracy: {self.best_acc:.4f}")
+                break
 
             # Save latest model checkpoint
             latest_path = os.path.join(self.output_dir, "latest_model.pt")

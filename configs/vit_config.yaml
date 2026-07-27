@@ -58,3 +58,4 @@ train:
   gradient_clip_val: 1.0
   eval_interval: 1
   use_amp: true
+  early_stopping_patience: 5
