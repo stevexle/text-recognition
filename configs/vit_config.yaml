@@ -19,7 +19,7 @@ dataset:
   train_split: 0.80
   val_split: 0.10
   test_split: 0.10
-  batch_size: 512
+  batch_size: 256
   num_workers: 0
   special_tokens:
     pad: "<pad>"
