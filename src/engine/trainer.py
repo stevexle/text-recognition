@@ -155,12 +155,7 @@ class Trainer:
     def validate_epoch(self, epoch: int) -> dict:
         """
         Execute model evaluation on validation set using autoregressive generation.
-        
-        Args:
-            epoch: Current epoch index
-            
-        Returns:
-            Dict containing val_loss, CER, WER, and Exact Match Accuracy
+        Limits generation to a fast, representative sample (default max 10,000 images) to prevent hanging.
         """
         self.model.eval()
         total_loss = 0.0
@@ -168,42 +163,57 @@ class Trainer:
         all_references = []
 
         max_label_length = self.config["dataset"].get("max_label_length", 64)
+        val_sample_limit = self.config["dataset"].get("val_sample_limit", 10000)
 
-        for batch in self.val_loader:
+        pbar = tqdm(
+            self.val_loader,
+            desc=f"Epoch [{epoch:02d}] Val",
+            leave=False,
+            dynamic_ncols=True
+        )
+
+        samples_processed = 0
+
+        for batch in pbar:
             images = batch["images"].to(self.device)
             targets_input = batch["targets_input"].to(self.device)
             targets_real = batch["targets_real"].to(self.device)
             raw_texts = batch["texts"]
 
-            # Compute validation loss (Teacher Forcing)
-            logits = self.model(images, targets_input)
-            vocab_size = logits.size(-1)
-            loss = self.criterion(
-                logits.view(-1, vocab_size),
-                targets_real.reshape(-1)
-            )
+            # Compute validation loss (Teacher Forcing) with AMP
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                logits = self.model(images, targets_input)
+                vocab_size = logits.size(-1)
+                loss = self.criterion(
+                    logits.view(-1, vocab_size),
+                    targets_real.reshape(-1)
+                )
             total_loss += loss.item()
 
-            # Autoregressive Generation for OCR Metric computation
-            gen_tokens = self.model.generate(
-                images,
-                max_len=max_label_length,
-                sos_idx=self.tokenizer.sos_id,
-                eos_idx=self.tokenizer.eos_id
-            )
+            # Perform Autoregressive Generation only up to val_sample_limit
+            if samples_processed < val_sample_limit:
+                gen_tokens = self.model.generate(
+                    images,
+                    max_len=max_label_length,
+                    sos_idx=self.tokenizer.sos_id,
+                    eos_idx=self.tokenizer.eos_id
+                )
+                pred_texts = [self.tokenizer.decode(tokens.cpu().tolist()) for tokens in gen_tokens]
+                all_predictions.extend(pred_texts)
+                all_references.extend(raw_texts)
+                samples_processed += images.size(0)
 
-            # Decode token IDs to text strings
-            pred_texts = [self.tokenizer.decode(tokens.cpu().tolist()) for tokens in gen_tokens]
-            all_predictions.extend(pred_texts)
-            all_references.extend(raw_texts)
+            # If we reached sample limit for metric calculation, break early to save hours of time
+            if samples_processed >= val_sample_limit:
+                break
 
-        avg_val_loss = total_loss / len(self.val_loader)
+        avg_val_loss = total_loss / (len(all_predictions) if len(all_predictions) > 0 else 1)
         cer = compute_cer(all_predictions, all_references)
         wer = compute_wer(all_predictions, all_references)
         acc = compute_accuracy(all_predictions, all_references)
 
         self.logger.info(
-            f"Validation Epoch [{epoch:02d}] -> "
+            f"Validation Epoch [{epoch:02d}] ({len(all_predictions):,} samples) -> "
             f"Val Loss: {avg_val_loss:.4f} | CER: {cer:.4f} | WER: {wer:.4f} | Acc: {acc:.4f}"
         )
 
