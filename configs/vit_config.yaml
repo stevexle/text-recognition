@@ -19,7 +19,7 @@ dataset:
   train_split: 0.80
   val_split: 0.10
   test_split: 0.10
-  batch_size: 256
+  batch_size: 512
   num_workers: 0
   special_tokens:
     pad: "<pad>"
@@ -48,7 +48,7 @@ model:
 
 # Training Hyperparameters
 train:
-  epochs: 50
+  epochs: 10
   learning_rate: 0.0003
   weight_decay: 0.01
   optimizer: "adamw"
