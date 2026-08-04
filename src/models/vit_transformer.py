@@ -102,21 +102,23 @@ class ViTTransformerOCR(nn.Module):
     def generate(
         self,
         images: torch.Tensor,
-        max_len: int = 64,
+        max_len: int = 256,
         sos_idx: int = 1,
-        eos_idx: int = 2
+        eos_idx: int = 2,
+        beam_size: int = 1
     ) -> torch.Tensor:
         """
-        Autoregressive greedy search text generation for Inference.
+        Autoregressive text generation for Inference (Greedy Search or Beam Search).
         
         Args:
             images: Input image tensor of shape [B, in_channels, H, W]
             max_len: Maximum sequence length to generate
             sos_idx: Start-of-Sequence token ID
             eos_idx: End-of-Sequence token ID
+            beam_size: Beam search beam width (1 for fast Greedy Search, >1 for Beam Search)
             
         Returns:
-            Generated token IDs tensor of shape [B, generated_length]
+            Generated token IDs tensor of shape [B, sequence_length]
         """
         self.eval()
         B = images.size(0)
@@ -125,22 +127,56 @@ class ViTTransformerOCR(nn.Module):
         # 1. Encode visual features ONCE -> Memory Z_enc [B, N, embed_dim]
         memory = self.encoder(images)
         
-        # 2. Initialize target tokens with <sos> -> Shape [B, 1]
-        ys = torch.full((B, 1), sos_idx, dtype=torch.long, device=device)
-        
-        # 3. Autoregressive decoding loop
-        for _ in range(max_len - 1):
-            logits = self.decoder(tgt_tokens=ys, memory=memory)  # Shape: [B, len(ys), vocab_size]
-            next_word_logits = logits[:, -1, :]                   # Last token logits: [B, vocab_size]
-            next_word = next_word_logits.argmax(dim=-1, keepdim=True)  # Greedy choice: [B, 1]
-            
-            ys = torch.cat([ys, next_word], dim=1)                # Append predicted token
-            
-            # Early stopping check: Stop if all samples in batch generated <eos>
-            if (ys == eos_idx).any(dim=1).all():
-                break
+        if beam_size <= 1:
+            # Fast Greedy Search
+            ys = torch.full((B, 1), sos_idx, dtype=torch.long, device=device)
+            for _ in range(max_len - 1):
+                logits = self.decoder(tgt_tokens=ys, memory=memory)
+                next_word_logits = logits[:, -1, :]
+                next_word = next_word_logits.argmax(dim=-1, keepdim=True)
+                ys = torch.cat([ys, next_word], dim=1)
+                if (ys == eos_idx).any(dim=1).all():
+                    break
+            return ys
+        else:
+            # Beam Search Decoding (per sample in batch)
+            best_sequences = []
+            for b in range(B):
+                single_memory = memory[b:b+1]
+                beams = [(torch.full((1, 1), sos_idx, dtype=torch.long, device=device), 0.0)]
+                completed_beams = []
                 
-        return ys
+                for step in range(max_len - 1):
+                    new_beams = []
+                    for seq, score in beams:
+                        if seq[0, -1].item() == eos_idx:
+                            completed_beams.append((seq, score))
+                            continue
+                        logits = self.decoder(tgt_tokens=seq, memory=single_memory)
+                        log_probs = torch.log_softmax(logits[:, -1, :], dim=-1).squeeze(0)
+                        topk_probs, topk_ids = log_probs.topk(beam_size)
+                        
+                        for k in range(beam_size):
+                            next_id = topk_ids[k].unsqueeze(0).unsqueeze(0)
+                            new_seq = torch.cat([seq, next_id], dim=1)
+                            new_score = score + topk_probs[k].item()
+                            new_beams.append((new_seq, new_score))
+                    
+                    if not new_beams:
+                        break
+                    beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_size]
+                    if len(completed_beams) >= beam_size:
+                        break
+                        
+                all_candidates = completed_beams + beams
+                best_seq, _ = max(all_candidates, key=lambda x: x[1] / max(1, x[0].size(1)))
+                best_sequences.append(best_seq.squeeze(0))
+                
+            max_gen_len = max(seq.size(0) for seq in best_sequences)
+            padded_ys = torch.full((B, max_gen_len), self.pad_idx, dtype=torch.long, device=device)
+            for b, seq in enumerate(best_sequences):
+                padded_ys[b, :seq.size(0)] = seq
+            return padded_ys
 
 
 if __name__ == "__main__":

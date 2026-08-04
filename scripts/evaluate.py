@@ -36,6 +36,12 @@ def parse_args():
         default="checkpoints/test_split.csv",
         help="Path to test split CSV metadata file"
     )
+    parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=1,
+        help="Beam size for decoding (1 for greedy, >1 for beam search)"
+    )
     return parser.parse_args()
 
 
@@ -100,9 +106,9 @@ def evaluate():
     # 4. Run Autoregressive Evaluation Loop
     all_predictions = []
     all_references = []
-    max_label_length = config["dataset"].get("max_label_length", 64)
+    max_label_length = config["dataset"].get("max_label_length", 256)
 
-    logger.info("Running autoregressive text generation on Test Set...")
+    logger.info(f"Running autoregressive text generation on Test Set (Beam Size: {args.beam_size}, Max Len: {max_label_length})...")
     for batch in test_loader:
         images = batch["images"].to(device)
         raw_texts = batch["texts"]
@@ -111,7 +117,8 @@ def evaluate():
             images,
             max_len=max_label_length,
             sos_idx=tokenizer.sos_id,
-            eos_idx=tokenizer.eos_id
+            eos_idx=tokenizer.eos_id,
+            beam_size=args.beam_size
         )
 
         pred_texts = [tokenizer.decode(tokens.cpu().tolist()) for tokens in gen_tokens]

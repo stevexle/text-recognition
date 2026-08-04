@@ -92,8 +92,12 @@ def download_and_export_dataset(
                     try:
                         if isinstance(raw_image, bytes):
                             image = Image.open(io.BytesIO(raw_image))
-                        elif isinstance(raw_image, dict) and "bytes" in raw_image:
+                        elif isinstance(raw_image, dict) and "bytes" in raw_image and raw_image["bytes"] is not None:
                             image = Image.open(io.BytesIO(raw_image["bytes"]))
+                        elif isinstance(raw_image, dict) and "path" in raw_image and raw_image["path"] and os.path.exists(str(raw_image["path"])):
+                            image = Image.open(str(raw_image["path"]))
+                        elif isinstance(raw_image, str) and os.path.exists(raw_image):
+                            image = Image.open(raw_image)
                         else:
                             image = raw_image
 

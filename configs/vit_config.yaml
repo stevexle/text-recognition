@@ -15,12 +15,12 @@ dataset:
   image_column: "image"
   text_column: "text"
   image_size: [32, 256]  # [height, width]
-  max_label_length: 64
+  max_label_length: 256
   train_split: 0.80
   val_split: 0.10
   test_split: 0.10
   batch_size: 256
-  num_workers: 0
+  num_workers: 4
   special_tokens:
     pad: "<pad>"
     sos: "<sos>"
@@ -48,7 +48,7 @@ model:
 
 # Training Hyperparameters
 train:
-  epochs: 10
+  epochs: 50
   learning_rate: 0.0003
   weight_decay: 0.01
   optimizer: "adamw"

@@ -162,7 +162,7 @@ class Trainer:
         all_predictions = []
         all_references = []
 
-        max_label_length = self.config["dataset"].get("max_label_length", 64)
+        max_label_length = self.config["dataset"].get("max_label_length", 256)
         val_sample_limit = self.config["dataset"].get("val_sample_limit", 10000)
 
         pbar = tqdm(
