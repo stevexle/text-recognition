@@ -18,7 +18,7 @@ from src.utils import load_config, setup_logger, set_seed
 from src.data.tokenizer import Tokenizer
 from src.data.dataset import OCRDataset
 from src.data.datamodule import build_dataloader
-from src.models.vit_transformer import ViTTransformerOCR
+from src.models.builder import build_model
 from src.engine.trainer import Trainer
 
 
@@ -149,25 +149,12 @@ def main():
     train_loader = build_dataloader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
     val_loader = build_dataloader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    # 5. Instantiate Model Architecture (Hybrid ViT Encoder + Transformer Decoder)
-    model_cfg = config["model"]
-    encoder_cfg = model_cfg["encoder"]
-    decoder_cfg = model_cfg["decoder"]
-
-    model = ViTTransformerOCR(
+    # 5. Instantiate Model Architecture dynamically via Model Registry/Factory
+    model = build_model(
+        model_cfg=config["model"],
         vocab_size=tokenizer.vocab_size,
-        in_channels=encoder_cfg.get("conv_stem", {}).get("in_channels", 3),
-        stem_channels=encoder_cfg.get("conv_stem", {}).get("stem_channels", [64, 128, 384]),
-        embed_dim=encoder_cfg.get("embed_dim", 384),
-        encoder_depth=encoder_cfg.get("depth", 6),
-        encoder_heads=encoder_cfg.get("num_heads", 6),
-        decoder_layers=decoder_cfg.get("num_layers", 4),
-        decoder_heads=decoder_cfg.get("nhead", 6),
-        dim_feedforward=decoder_cfg.get("dim_feedforward", 1536),
-        dropout=decoder_cfg.get("dropout", 0.1),
-        image_size=image_size,
-        max_seq_len=decoder_cfg.get("max_seq_len", 256),
-        pad_idx=tokenizer.pad_id
+        pad_idx=tokenizer.pad_id,
+        image_size=image_size
     )
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

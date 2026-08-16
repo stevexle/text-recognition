@@ -12,7 +12,7 @@ from src.utils import load_checkpoint, setup_logger
 from src.data.tokenizer import Tokenizer
 from src.data.dataset import OCRDataset
 from src.data.datamodule import build_dataloader
-from src.models.vit_transformer import ViTTransformerOCR
+from src.models.builder import build_model
 from src.metrics import compute_cer, compute_wer, compute_accuracy
 
 
@@ -78,25 +78,12 @@ def evaluate():
         num_workers=config["dataset"].get("num_workers", 4)
     )
 
-    # 3. Instantiate Model Architecture & Load State Dict
-    model_cfg = config["model"]
-    encoder_cfg = model_cfg["encoder"]
-    decoder_cfg = model_cfg["decoder"]
-
-    model = ViTTransformerOCR(
+    # 3. Instantiate Model Architecture dynamically & Load State Dict
+    model = build_model(
+        model_cfg=config.get("model", {"name": "vit_transformer"}),
         vocab_size=tokenizer.vocab_size,
-        in_channels=encoder_cfg.get("conv_stem", {}).get("in_channels", 3),
-        stem_channels=encoder_cfg.get("conv_stem", {}).get("stem_channels", [64, 128, 384]),
-        embed_dim=encoder_cfg.get("embed_dim", 384),
-        encoder_depth=encoder_cfg.get("depth", 6),
-        encoder_heads=encoder_cfg.get("num_heads", 6),
-        decoder_layers=decoder_cfg.get("num_layers", 4),
-        decoder_heads=decoder_cfg.get("nhead", 6),
-        dim_feedforward=decoder_cfg.get("dim_feedforward", 1536),
-        dropout=decoder_cfg.get("dropout", 0.1),
-        image_size=image_size,
-        max_seq_len=decoder_cfg.get("max_seq_len", 256),
-        pad_idx=tokenizer.pad_id
+        pad_idx=tokenizer.pad_id,
+        image_size=image_size
     )
 
     model.load_state_dict(ckpt["model_state_dict"])

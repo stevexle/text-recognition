@@ -23,3 +23,8 @@ wandb/
 *.safetensors
 *.parquet
 *.csv
+
+# Test personal data & cropped images
+test/cccd*.jpg
+test/cropped/
+
