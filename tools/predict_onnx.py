@@ -111,7 +111,7 @@ def main():
         help="Path to vocabulary JSON file (default: checkpoints/vocab.json)",
     )
     parser.add_argument("--batch-size", type=int, default=16, help="Inference batch size (default: 16)")
-    parser.add_argument("--max-len", type=int, default=64, help="Maximum sequence length (default: 64)")
+    parser.add_argument("--max-len", type=int, default=256, help="Maximum sequence length (default: 64)")
     parser.add_argument(
         "--warmup",
         type=int,

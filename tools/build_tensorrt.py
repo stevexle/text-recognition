@@ -62,7 +62,7 @@ SHAPE_PROFILES = {
         "tgt_tokens": {
             "min": (1, 1),
             "opt": (16, 16),
-            "max": (64, 128),
+            "max": (64, 256),
         },
         "memory": {
             "min": (1, 256, 384),

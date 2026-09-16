@@ -5,10 +5,11 @@ Executes Encoder & Decoder entirely via ONNX Runtime with hardware acceleration
 (CUDAExecutionProvider / CoreMLExecutionProvider / CPUExecutionProvider).
 Supports single image, vectorized batch inference, and asynchronous ASGI prediction.
 Features:
+  - Exact match with PyTorch training transforms (PIL Bilinear with anti-aliasing + mean=0.5, std=0.5).
   - Auto-detection and pre-registration of NVIDIA CUDA & cuDNN shared libraries on Linux.
   - Fused in-place zero-allocation image preprocessing directly into batch buffers.
   - Preallocated token buffers eliminating array reallocations during decoding.
-  - Encoder run once per batch; vectorized autoregressive greedy decoder loop.
+  - Encoder run once per batch; vectorized autoregressive greedy decoder loop up to max_len=256.
 """
 
 import asyncio
@@ -42,7 +43,6 @@ if sys.platform == "linux" and "ORT_CUDA_LOADED" not in os.environ:
     except Exception:
         pass
 
-import cv2
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
@@ -59,7 +59,7 @@ class OCRPredictorONNX:
         decoder_onnx: str = "weights/onnx/decoder.onnx",
         vocab_path: str = "checkpoints/vocab.json",
         image_size: tuple[int, int] = (32, 256),
-        max_len: int = 64,
+        max_len: int = 256,
         providers: Optional[List[str]] = None,
     ):
         self.image_size = image_size
@@ -98,11 +98,10 @@ class OCRPredictorONNX:
         self.dec_memory_name = dec_in[1].name
         self.dec_output_name = self.decoder_sess.get_outputs()[0].name
 
-        # 5. Pre-computed ImageNet Normalization Constants
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        self.scale = 1.0 / (255.0 * std)
-        self.bias = -mean / std
+        # 5. Normalization constants matching torchvision.transforms: mean=0.5, std=0.5
+        # (x / 255.0 - 0.5) / 0.5 = (x / 127.5) - 1.0 -> range [-1.0, 1.0]
+        self.scale = 1.0 / 127.5
+        self.bias = -1.0
 
     def _resolve_providers(self, user_providers: Optional[List[str]]) -> List[str]:
         if user_providers is not None:
@@ -112,11 +111,10 @@ class OCRPredictorONNX:
         selected = []
 
         if "CUDAExecutionProvider" in available:
-            # Check CUDA provider options
             cuda_options = {
                 "device_id": 0,
                 "arena_extend_strategy": "kNextPowerOfTwo",
-                "gpu_mem_limit": 2 * 1024 * 1024 * 1024,  # 2 GB
+                "gpu_mem_limit": 2 * 1024 * 1024 * 1024,
                 "cudnn_conv_algo_search": "EXHAUSTIVE",
                 "do_copy_in_default_stream": True,
             }
@@ -131,33 +129,32 @@ class OCRPredictorONNX:
         out_buffer: np.ndarray,
     ) -> None:
         """
-        Zero-allocation in-place image preprocessing:
-        Reads, resizes, normalizes, and writes directly into target slice out_buffer (3, H, W).
+        Preprocess image to match PyTorch training transform:
+        Resize to (target_w, target_h) using PIL Bilinear interpolation (with anti-aliasing),
+        and apply normalization with mean=0.5, std=0.5 -> range [-1.0, 1.0].
         """
         if isinstance(img_input, (str, Path)):
-            raw_bgr = cv2.imread(str(img_input))
-            if raw_bgr is None:
-                raise ValueError(f"Could not load image from path: {img_input}")
-            img_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.open(str(img_input)).convert("RGB")
         elif isinstance(img_input, Image.Image):
-            img_rgb = np.array(img_input.convert("RGB"))
+            pil_img = img_input.convert("RGB")
         elif isinstance(img_input, np.ndarray):
             if img_input.ndim == 2:
-                img_rgb = cv2.cvtColor(img_input, cv2.COLOR_GRAY2RGB)
+                pil_img = Image.fromarray(img_input).convert("RGB")
             elif img_input.shape[2] == 3:
-                img_rgb = img_input
+                pil_img = Image.fromarray(img_input)
             else:
-                img_rgb = img_input[:, :, :3]
+                pil_img = Image.fromarray(img_input[:, :, :3])
         else:
             raise TypeError(f"Unsupported image input type: {type(img_input)}")
 
         target_h, target_w = self.image_size
-        resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        resized = pil_img.resize((target_w, target_h), resample=Image.BILINEAR)
+        arr = np.array(resized, dtype=np.float32)
 
-        # In-place channel assignment and fused normalization: (resized * scale) + bias
-        out_buffer[0] = resized[:, :, 0] * self.scale[0] + self.bias[0]
-        out_buffer[1] = resized[:, :, 1] * self.scale[1] + self.bias[1]
-        out_buffer[2] = resized[:, :, 2] * self.scale[2] + self.bias[2]
+        # Fused normalization: (x / 127.5) - 1.0 -> range [-1.0, 1.0]
+        out_buffer[0] = arr[:, :, 0] * self.scale + self.bias
+        out_buffer[1] = arr[:, :, 1] * self.scale + self.bias
+        out_buffer[2] = arr[:, :, 2] * self.scale + self.bias
 
     def predict(self, image: Union[str, Path, Image.Image, np.ndarray]) -> str:
         """Run OCR text recognition on a single cropped text image."""

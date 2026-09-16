@@ -3,10 +3,11 @@ High-Performance NVIDIA TensorRT Predictor for ViT-Transformer Text Recognition.
 
 Executes Encoder & Decoder via native TensorRT C++ Execution Contexts.
 Features:
-  - Zero-allocation CUDA device buffer reuse and pinned host memory transfers.
-  - Encoder executed once per batch; vectorized autoregressive greedy decoder loop.
+  - Exact match with PyTorch training transforms (PIL Bilinear with anti-aliasing + mean=0.5, std=0.5).
+  - Zero-allocation contiguous CUDA device buffer reuse and pinned host memory transfers.
+  - Encoder executed once per batch; vectorized autoregressive greedy decoder loop up to max_len=256.
   - Static memory binding cached outside the autoregressive decoding loop.
-  - Preallocated logits device buffer eliminating per-token cudaMalloc calls.
+  - Preallocated contiguous logits device buffer eliminating per-token cudaMalloc calls.
   - Fused in-place image normalization directly into contiguous batch tensors.
   - Dedicated CUDA streams for async H2D, compute, and D2H transfers.
   - Supports single image, batch inference, and ASGI asynchronous prediction.
@@ -43,7 +44,6 @@ if sys.platform == "linux" and "ORT_CUDA_LOADED" not in os.environ:
     except Exception:
         pass
 
-import cv2
 import numpy as np
 from PIL import Image
 import torch
@@ -63,7 +63,7 @@ class OCRPredictorTRT:
         decoder_engine: str = "weights/tensorrt/decoder.engine",
         vocab_path: str = "checkpoints/vocab.json",
         image_size: tuple[int, int] = (32, 256),
-        max_len: int = 64,
+        max_len: int = 256,
         device_id: int = 0,
     ):
         self.image_size = image_size
@@ -123,14 +123,13 @@ class OCRPredictorTRT:
         self._cached_batch_size: Optional[int] = None
         self._gpu_image: Optional[torch.Tensor] = None
         self._gpu_enc_memory: Optional[torch.Tensor] = None
-        self._gpu_logits_buffer: Optional[torch.Tensor] = None
+        self._gpu_logits_raw: Optional[torch.Tensor] = None
         self._host_image_pinned: Optional[torch.Tensor] = None
 
-        # Pre-computed ImageNet normalization vectors
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        self.scale = 1.0 / (255.0 * std)
-        self.bias = -mean / std
+        # Normalization constants matching torchvision.transforms: mean=0.5, std=0.5
+        # (x / 255.0 - 0.5) / 0.5 = (x / 127.5) - 1.0 -> range [-1.0, 1.0]
+        self.scale = 1.0 / 127.5
+        self.bias = -1.0
 
     def _get_tensor_names(self, engine, is_input: bool) -> List[str]:
         names = []
@@ -152,31 +151,33 @@ class OCRPredictorTRT:
         img_input: Union[str, Path, Image.Image, np.ndarray],
         out_buffer: np.ndarray,
     ) -> None:
-        """In-place zero-allocation image reading, resizing, and normalization."""
+        """
+        Preprocess image to match PyTorch training transform:
+        Resize to (target_w, target_h) using PIL Bilinear interpolation (with anti-aliasing),
+        and apply normalization with mean=0.5, std=0.5 -> range [-1.0, 1.0].
+        """
         if isinstance(img_input, (str, Path)):
-            raw_bgr = cv2.imread(str(img_input))
-            if raw_bgr is None:
-                raise ValueError(f"Could not load image from path: {img_input}")
-            img_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.open(str(img_input)).convert("RGB")
         elif isinstance(img_input, Image.Image):
-            img_rgb = np.array(img_input.convert("RGB"))
+            pil_img = img_input.convert("RGB")
         elif isinstance(img_input, np.ndarray):
             if img_input.ndim == 2:
-                img_rgb = cv2.cvtColor(img_input, cv2.COLOR_GRAY2RGB)
+                pil_img = Image.fromarray(img_input).convert("RGB")
             elif img_input.shape[2] == 3:
-                img_rgb = img_input
+                pil_img = Image.fromarray(img_input)
             else:
-                img_rgb = img_input[:, :, :3]
+                pil_img = Image.fromarray(img_input[:, :, :3])
         else:
             raise TypeError(f"Unsupported image input type: {type(img_input)}")
 
         target_h, target_w = self.image_size
-        resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        resized = pil_img.resize((target_w, target_h), resample=Image.BILINEAR)
+        arr = np.array(resized, dtype=np.float32)
 
-        # In-place channel assignment with fused normalization
-        out_buffer[0] = resized[:, :, 0] * self.scale[0] + self.bias[0]
-        out_buffer[1] = resized[:, :, 1] * self.scale[1] + self.bias[1]
-        out_buffer[2] = resized[:, :, 2] * self.scale[2] + self.bias[2]
+        # In-place channel assignment with fused normalization [-1.0, 1.0]
+        out_buffer[0] = arr[:, :, 0] * self.scale + self.bias
+        out_buffer[1] = arr[:, :, 1] * self.scale + self.bias
+        out_buffer[2] = arr[:, :, 2] * self.scale + self.bias
 
     def _run_encoder(self, images_np: np.ndarray) -> torch.Tensor:
         """Execute Encoder on batch images (B, 3, 32, 256) and return memory tensor (B, 256, 384)."""
