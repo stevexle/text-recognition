@@ -5,6 +5,9 @@ Executes Encoder & Decoder via native TensorRT C++ Execution Contexts.
 Features:
   - Zero-allocation CUDA device buffer reuse and pinned host memory transfers.
   - Encoder executed once per batch; vectorized autoregressive greedy decoder loop.
+  - Static memory binding cached outside the autoregressive decoding loop.
+  - Preallocated logits device buffer eliminating per-token cudaMalloc calls.
+  - Fused in-place image normalization directly into contiguous batch tensors.
   - Dedicated CUDA streams for async H2D, compute, and D2H transfers.
   - Supports single image, batch inference, and ASGI asynchronous prediction.
 """
@@ -120,7 +123,6 @@ class OCRPredictorTRT:
         self.enc_output_name = self._get_tensor_names(self.encoder_engine, is_input=False)[0]
 
         dec_inputs = self._get_tensor_names(self.decoder_engine, is_input=True)
-        # Expected: ['tgt_tokens', 'memory']
         self.dec_tgt_name = "tgt_tokens" if "tgt_tokens" in dec_inputs else dec_inputs[0]
         self.dec_mem_name = "memory" if "memory" in dec_inputs else dec_inputs[1]
         self.dec_output_name = self._get_tensor_names(self.decoder_engine, is_input=False)[0]
@@ -129,6 +131,7 @@ class OCRPredictorTRT:
         self._cached_batch_size: Optional[int] = None
         self._gpu_image: Optional[torch.Tensor] = None
         self._gpu_enc_memory: Optional[torch.Tensor] = None
+        self._gpu_logits_buffer: Optional[torch.Tensor] = None
         self._host_image_pinned: Optional[torch.Tensor] = None
 
         # Pre-computed ImageNet normalization vectors
@@ -147,14 +150,17 @@ class OCRPredictorTRT:
                 if mode == expected:
                     names.append(name)
         else:
-            # Older TensorRT 8.x binding API
             for i in range(engine.num_bindings):
                 if engine.binding_is_input(i) == is_input:
                     names.append(engine.get_binding_name(i))
         return names
 
-    def _preprocess_image(self, img_input: Union[str, Path, Image.Image, np.ndarray]) -> np.ndarray:
-        """Resize image to (H=32, W=256), normalize, and return contiguous (3, H, W) array."""
+    def _preprocess_image_into(
+        self,
+        img_input: Union[str, Path, Image.Image, np.ndarray],
+        out_buffer: np.ndarray,
+    ) -> None:
+        """In-place zero-allocation image reading, resizing, and normalization."""
         if isinstance(img_input, (str, Path)):
             raw_bgr = cv2.imread(str(img_input))
             if raw_bgr is None:
@@ -175,23 +181,22 @@ class OCRPredictorTRT:
         target_h, target_w = self.image_size
         resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Fused normalization
-        norm = resized.astype(np.float32)
-        norm = np.multiply(norm, self.scale, out=norm)
-        norm = np.add(norm, self.bias, out=norm)
-
-        return np.ascontiguousarray(np.transpose(norm, (2, 0, 1)))
+        # In-place channel assignment with fused normalization
+        out_buffer[0] = resized[:, :, 0] * self.scale[0] + self.bias[0]
+        out_buffer[1] = resized[:, :, 1] * self.scale[1] + self.bias[1]
+        out_buffer[2] = resized[:, :, 2] * self.scale[2] + self.bias[2]
 
     def _run_encoder(self, images_np: np.ndarray) -> torch.Tensor:
-        """Execute Encoder on input batch images (B, 3, 32, 256) and return memory tensor (B, 256, 384)."""
+        """Execute Encoder on batch images (B, 3, 32, 256) and return memory tensor (B, 256, 384)."""
         b, c, h, w = images_np.shape
         target_shape = (b, c, h, w)
 
-        # Allocate or reuse GPU buffer
+        # Allocate or reuse GPU buffers
         if self._cached_batch_size != b:
             self._cached_batch_size = b
             self._gpu_image = torch.empty(target_shape, dtype=torch.float32, device=self.device)
             self._gpu_enc_memory = torch.empty((b, 256, 384), dtype=torch.float32, device=self.device)
+            self._gpu_logits_buffer = torch.empty((b, self.max_len, self.vocab_size), dtype=torch.float32, device=self.device)
             try:
                 self._host_image_pinned = torch.empty(target_shape, dtype=torch.float32, pin_memory=True)
             except Exception:
@@ -223,35 +228,39 @@ class OCRPredictorTRT:
         Vectorized autoregressive greedy decoding loop executed entirely on GPU.
         Memory: shape (B, 256, 384) on GPU.
         """
-        # Start tokens: [B, 1] filled with sos_id
         current_tokens = torch.full((batch_size, 1), self.tokenizer.sos_id, dtype=torch.int64, device=self.device)
         finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
 
         with torch.cuda.stream(self.stream):
+            # 1. Bind static visual memory shape & address ONCE outside the decoding loop
+            if hasattr(self.decoder_ctx, "set_input_shape"):
+                self.decoder_ctx.set_input_shape(self.dec_mem_name, (batch_size, 256, 384))
+                self.decoder_ctx.set_tensor_address(self.dec_mem_name, memory.data_ptr())
+
+            # 2. Autoregressive token generation loop
             for step in range(self.max_len - 1):
                 cur_len = current_tokens.shape[1]
-                logits_out = torch.empty((batch_size, cur_len, self.vocab_size), dtype=torch.float32, device=self.device)
+                # Slice preallocated contiguous logits view: [batch_size, cur_len, vocab_size]
+                logits_view = self._gpu_logits_buffer[:batch_size, :cur_len, :]
 
-                # Set input shapes and bindings for Decoder
+                # Update dynamic token shape and binding pointers
                 if hasattr(self.decoder_ctx, "set_input_shape"):
                     self.decoder_ctx.set_input_shape(self.dec_tgt_name, (batch_size, cur_len))
-                    self.decoder_ctx.set_input_shape(self.dec_mem_name, (batch_size, 256, 384))
                     self.decoder_ctx.set_tensor_address(self.dec_tgt_name, current_tokens.data_ptr())
-                    self.decoder_ctx.set_tensor_address(self.dec_mem_name, memory.data_ptr())
-                    self.decoder_ctx.set_tensor_address(self.dec_output_name, logits_out.data_ptr())
+                    self.decoder_ctx.set_tensor_address(self.dec_output_name, logits_view.data_ptr())
                     self.decoder_ctx.execute_async_v3(stream_handle=self.stream.cuda_stream)
                 else:
                     bindings = [
                         int(current_tokens.data_ptr()),
                         int(memory.data_ptr()),
-                        int(logits_out.data_ptr()),
+                        int(logits_view.data_ptr()),
                     ]
                     self.decoder_ctx.set_binding_shape(0, (batch_size, cur_len))
                     self.decoder_ctx.set_binding_shape(1, (batch_size, 256, 384))
                     self.decoder_ctx.execute_async_v2(bindings=bindings, stream_handle=self.stream.cuda_stream)
 
-                # Last token logits -> greedy argmax
-                last_logits = logits_out[:, -1, :]  # [B, vocab_size]
+                # Last token logits -> greedy argmax on GPU
+                last_logits = logits_view[:, -1, :]  # [B, vocab_size]
                 next_token = torch.argmax(last_logits, dim=-1, keepdim=True)  # [B, 1]
 
                 # Update finished status
@@ -260,12 +269,13 @@ class OCRPredictorTRT:
 
                 current_tokens = torch.cat([current_tokens, next_token], dim=1)
 
-                if finished.all():
+                # Avoid GPU-to-CPU synchronization stalls during the first 5 characters
+                if step >= 5 and finished.all():
                     break
 
         self.stream.synchronize()
 
-        # Decode tokens to text strings
+        # Decode token sequences to text strings
         results = []
         tokens_cpu = current_tokens.cpu().tolist()
         for b_tokens in tokens_cpu:
@@ -290,14 +300,16 @@ class OCRPredictorTRT:
 
         all_results: List[str] = []
         total = len(images)
+        target_h, target_w = self.image_size
 
         for i in range(0, total, batch_size):
             chunk = images[i : i + batch_size]
             b_size = len(chunk)
 
-            # Vectorized preprocessing
-            preprocessed = [self._preprocess_image(img) for img in chunk]
-            batch_np = np.stack(preprocessed, axis=0)  # (B, 3, 32, 256)
+            # Preallocate contiguous batch array and normalize in-place (B, 3, 32, 256)
+            batch_np = np.empty((b_size, 3, target_h, target_w), dtype=np.float32)
+            for idx, img in enumerate(chunk):
+                self._preprocess_image_into(img, batch_np[idx])
 
             # 1. Run Encoder (once per batch)
             memory = self._run_encoder(batch_np)

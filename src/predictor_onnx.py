@@ -4,6 +4,10 @@ High-Performance ONNX Runtime OCR Predictor for ViT-Transformer Text Recognition
 Executes Encoder & Decoder entirely via ONNX Runtime with hardware acceleration
 (CUDAExecutionProvider / CoreMLExecutionProvider / CPUExecutionProvider).
 Supports single image, vectorized batch inference, and asynchronous ASGI prediction.
+Features:
+  - Fused in-place zero-allocation image preprocessing directly into batch buffers.
+  - Preallocated token buffers eliminating array reallocations during decoding.
+  - Encoder run once per batch; vectorized autoregressive greedy decoder loop.
 """
 
 import asyncio
@@ -43,45 +47,60 @@ class OCRPredictorONNX:
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 4) // 2))
 
-        # 3. Initialize Sessions
-        enc_p = Path(encoder_onnx)
-        dec_p = Path(decoder_onnx)
-        if not enc_p.exists():
-            raise FileNotFoundError(f"Encoder ONNX model not found: {enc_p}")
-        if not dec_p.exists():
-            raise FileNotFoundError(f"Decoder ONNX model not found: {dec_p}")
+        # 3. Create Inference Sessions
+        self.encoder_path = Path(encoder_onnx)
+        self.decoder_path = Path(decoder_onnx)
+        if not self.encoder_path.exists():
+            raise FileNotFoundError(f"Encoder ONNX model not found: {self.encoder_path}")
+        if not self.decoder_path.exists():
+            raise FileNotFoundError(f"Decoder ONNX model not found: {self.decoder_path}")
 
-        self.encoder_sess = ort.InferenceSession(str(enc_p), sess_options=sess_opts, providers=self.providers)
-        self.decoder_sess = ort.InferenceSession(str(dec_p), sess_options=sess_opts, providers=self.providers)
+        self.encoder_sess = ort.InferenceSession(
+            str(self.encoder_path), sess_options=sess_opts, providers=self.providers
+        )
+        self.decoder_sess = ort.InferenceSession(
+            str(self.decoder_path), sess_options=sess_opts, providers=self.providers
+        )
 
+        # 4. Cache Input & Output Node Names
         self.enc_input_name = self.encoder_sess.get_inputs()[0].name
-        self.dec_tokens_name = self.decoder_sess.get_inputs()[0].name
-        self.dec_memory_name = self.decoder_sess.get_inputs()[1].name
+        self.enc_output_name = self.encoder_sess.get_outputs()[0].name
 
-        # 4. Precomputed normalization parameters (ImageNet standard)
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
-        self.scale = (1.0 / (255.0 * std)).astype(np.float32)
-        self.bias = (-mean / std).astype(np.float32)
+        dec_in = self.decoder_sess.get_inputs()
+        self.dec_tokens_name = dec_in[0].name
+        self.dec_memory_name = dec_in[1].name
+        self.dec_output_name = self.decoder_sess.get_outputs()[0].name
 
-    @staticmethod
-    def _resolve_providers(requested: Optional[List[str]]) -> List[str]:
-        if requested is not None:
-            return requested
+        # 5. Pre-computed ImageNet Normalization Constants
+        # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        self.scale = 1.0 / (255.0 * std)
+        self.bias = -mean / std
+
+    def _resolve_providers(self, user_providers: Optional[List[str]]) -> List[str]:
+        if user_providers is not None:
+            return user_providers
+
         available = ort.get_available_providers()
-        resolved = []
-        if "CUDAExecutionProvider" in available:
-            resolved.append("CUDAExecutionProvider")
-        # CoreML has limitations with dynamic batch sizes on Mac, prefer CPU on macOS
-        # if "CoreMLExecutionProvider" in available:
-        #     resolved.append("CoreMLExecutionProvider")
-        resolved.append("CPUExecutionProvider")
-        return resolved
+        selected = []
 
-    def _preprocess_image(self, img_input: Union[str, Path, Image.Image, np.ndarray]) -> np.ndarray:
+        if "CUDAExecutionProvider" in available:
+            selected.append("CUDAExecutionProvider")
+
+        # Note: CoreMLExecutionProvider on macOS has limitations with dynamic batching > 1,
+        # so CPUExecutionProvider is preferred for reliable high-throughput batching on Darwin.
+        selected.append("CPUExecutionProvider")
+        return selected
+
+    def _preprocess_image_into(
+        self,
+        img_input: Union[str, Path, Image.Image, np.ndarray],
+        out_buffer: np.ndarray,
+    ) -> None:
         """
-        Resize image to (H=32, W=256), convert to RGB, apply fused normalization,
-        and output contiguous array of shape (3, H, W).
+        Zero-allocation in-place image preprocessing:
+        Reads, resizes, normalizes, and writes directly into target slice out_buffer (3, H, W).
         """
         if isinstance(img_input, (str, Path)):
             raw_bgr = cv2.imread(str(img_input))
@@ -94,7 +113,7 @@ class OCRPredictorONNX:
             if img_input.ndim == 2:
                 img_rgb = cv2.cvtColor(img_input, cv2.COLOR_GRAY2RGB)
             elif img_input.shape[2] == 3:
-                img_rgb = img_input  # assumes RGB if numpy, or convert if BGR
+                img_rgb = img_input
             else:
                 img_rgb = img_input[:, :, :3]
         else:
@@ -103,13 +122,10 @@ class OCRPredictorONNX:
         target_h, target_w = self.image_size
         resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Fused normalization: (img * scale) + bias
-        norm = resized.astype(np.float32)
-        norm = np.multiply(norm, self.scale, out=norm)
-        norm = np.add(norm, self.bias, out=norm)
-
-        # (H, W, C) -> (C, H, W)
-        return np.ascontiguousarray(np.transpose(norm, (2, 0, 1)))
+        # In-place channel assignment and fused normalization: (resized * scale) + bias
+        out_buffer[0] = resized[:, :, 0] * self.scale[0] + self.bias[0]
+        out_buffer[1] = resized[:, :, 1] * self.scale[1] + self.bias[1]
+        out_buffer[2] = resized[:, :, 2] * self.scale[2] + self.bias[2]
 
     def predict(self, image: Union[str, Path, Image.Image, np.ndarray]) -> str:
         """Run OCR text recognition on a single cropped text image."""
@@ -129,53 +145,59 @@ class OCRPredictorONNX:
             return []
 
         all_preds = []
+        target_h, target_w = self.image_size
+
         for i in range(0, len(images), batch_size):
             chunk = images[i : i + batch_size]
-            tensors = [self._preprocess_image(im) for im in chunk]
-            batch_tensor = np.stack(tensors, axis=0)  # Shape: (B, 3, 32, 256)
-            b_size = batch_tensor.shape[0]
+            b_size = len(chunk)
 
-            # 1. Run ViT Encoder ONCE -> Memory (B, 256, 384)
-            memory = self.encoder_sess.run(None, {self.enc_input_name: batch_tensor})[0]
+            # 1. Preallocate batch input tensor once and fill in-place (B, 3, 32, 256)
+            batch_tensor = np.empty((b_size, 3, target_h, target_w), dtype=np.float32)
+            for idx, im in enumerate(chunk):
+                self._preprocess_image_into(im, batch_tensor[idx])
 
-            # 2. Vectorized Greedy Decoding Loop
-            tokens = np.full((b_size, 1), self.tokenizer.sos_id, dtype=np.int64)
+            # 2. Run ViT Encoder ONCE per batch -> Visual Memory (B, 256, 384)
+            memory = self.encoder_sess.run(
+                [self.enc_output_name],
+                {self.enc_input_name: batch_tensor},
+            )[0]
+
+            # 3. Preallocated Vectorized Greedy Decoding Buffer
+            tokens = np.empty((b_size, self.max_len), dtype=np.int64)
+            tokens[:, 0] = self.tokenizer.sos_id
             finished = np.zeros(b_size, dtype=bool)
+            actual_len = 1
 
-            for _ in range(self.max_len):
+            for step in range(self.max_len - 1):
+                cur_tokens = np.ascontiguousarray(tokens[:, : step + 1])
                 logits = self.decoder_sess.run(
-                    None,
-                    {self.dec_tokens_name: tokens, self.dec_memory_name: memory},
+                    [self.dec_output_name],
+                    {self.dec_tokens_name: cur_tokens, self.dec_memory_name: memory},
                 )[0]
 
-                # Argmax on last position for each batch element
-                next_tokens = np.argmax(logits[:, -1, :], axis=-1, keepdims=True)  # (B, 1)
-                tokens = np.concatenate([tokens, next_tokens], axis=1)
+                # Vectorized argmax on last token position: (B,)
+                next_tokens = np.argmax(logits[:, -1, :], axis=-1)
+                tokens[:, step + 1] = next_tokens
+                actual_len = step + 2
 
                 # Check for EOS
-                is_eos = (next_tokens.squeeze(-1) == self.tokenizer.eos_id)
+                is_eos = (next_tokens == self.tokenizer.eos_id)
                 finished = finished | is_eos
-                if finished.all():
+                if step >= 5 and finished.all():
                     break
 
-            # 3. Decode token sequences into strings
+            # 4. Decode token sequences into text strings
             for b in range(b_size):
-                tok_seq = tokens[b].tolist()
+                tok_seq = tokens[b, :actual_len].tolist()
                 text = self.tokenizer.decode(tok_seq)
                 all_preds.append(text)
 
         return all_preds
 
-    async def predict_async(self, image: Union[str, Path, Image.Image, np.ndarray]) -> str:
-        """Asynchronous non-blocking prediction for FastAPI/ASGI servers."""
+    async def predict_async(
+        self,
+        image: Union[str, Path, Image.Image, np.ndarray],
+    ) -> str:
+        """Asynchronous execution wrapper for FastAPI/ASGI server endpoints."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.predict, image)
-
-    async def predict_batch_async(
-        self,
-        images: Sequence[Union[str, Path, Image.Image, np.ndarray]],
-        batch_size: int = 16,
-    ) -> List[str]:
-        """Asynchronous batch prediction for FastAPI/ASGI servers."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.predict_batch, images, batch_size)
