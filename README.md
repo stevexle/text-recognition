@@ -186,15 +186,17 @@ uv run python tools/build_tensorrt.py --model all --fp16
 Run batch inference with latency profiling (P50, P90, P95, P99, FPS):
 
 ```bash
-# Benchmark with repeat iterations:
+# 1. Chạy với ONNX Runtime (CPU/GPU):
+uv run python tools/predict_onnx.py --repeat 10
+uv run python tools/predict_onnx.py --image test/cropped/ho_va_ten.jpg
+uv run python tools/predict_onnx.py --input-dir test/cropped/ --output results_onnx.json
+
+# 2. Chạy với NVIDIA TensorRT (GPU):
 uv run python tools/predict_trt.py --repeat 10
-
-# Predict a single cropped image:
 uv run python tools/predict_trt.py --image test/cropped/ho_va_ten.jpg
-
-# Predict an entire folder and export results to JSON:
-uv run python tools/predict_trt.py --input-dir test/cropped/ --output results.json
+uv run python tools/predict_trt.py --input-dir test/cropped/ --output results_trt.json
 ```
+
 
 ### 4. Python Integration
 
