@@ -4,9 +4,10 @@ Production ONNX Runtime Text Recognition Inference & Benchmarking CLI Tool.
 Features:
   - Single image, list of images, or recursive directory inference.
   - Multi-threaded CPU / GPU (CUDA) / Apple Silicon (CoreML) hardware acceleration.
-  - Benchmark latency profiling: Latency (Mean, P50, P90, P95, P99), Throughput (FPS).
-  - Configurable repeat iterations (--repeat N) for production stress testing.
-  - JSON results export.
+  - Pre-loads images into RAM to isolate pure model inference throughput from disk I/O.
+  - Comprehensive statistical profiling: Latency (Mean, P50, P90, P95, P99, Min, Max, StdDev), Throughput (FPS).
+  - Configurable repeat iterations (--repeat N) for stress testing with throttled progress output.
+  - Standardized JSON results export.
 """
 
 import argparse
@@ -16,8 +17,9 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from src.predictor_onnx import OCRPredictorONNX
@@ -41,6 +43,18 @@ def collect_images(image_arg: Optional[str], input_dir_arg: Optional[str]) -> Li
             image_paths.extend(glob.glob(str(p / "**" / ext), recursive=True))
 
     return sorted(list(set(image_paths)))
+
+
+def preload_images(image_paths: List[str]) -> List[Tuple[str, np.ndarray]]:
+    """Pre-load images into RAM to isolate pure inference latency from disk I/O."""
+    loaded = []
+    for p in image_paths:
+        img = cv2.imread(p)
+        if img is not None:
+            loaded.append((p, img))
+        else:
+            print(f"[WARNING] Skipping unreadable image: {p}")
+    return loaded
 
 
 def main():
@@ -75,6 +89,12 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16, help="Inference batch size (default: 16)")
     parser.add_argument("--max-len", type=int, default=64, help="Maximum sequence length (default: 64)")
     parser.add_argument(
+        "--warmup",
+        type=int,
+        default=1,
+        help="Number of warmup iterations before profiling (default: 1)",
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -83,12 +103,11 @@ def main():
     parser.add_argument("--output", type=str, help="Path to export predictions as JSON")
     args = parser.parse_args()
 
-    # Collect images
     default_dir = "test/cropped" if (not args.image and not args.input_dir and Path("test/cropped").exists()) else None
     input_dir = args.input_dir or default_dir
-    images = collect_images(args.image, input_dir)
+    image_paths = collect_images(args.image, input_dir)
 
-    if not images:
+    if not image_paths:
         print("[ERROR] No images found to process. Please provide --image or --input-dir.")
         sys.exit(1)
 
@@ -97,73 +116,104 @@ def main():
     print(f"=======================================================================")
     print(f"Encoder ONNX:  {args.encoder}")
     print(f"Decoder ONNX:  {args.decoder}")
-    print(f"Target Images: {len(images)} images")
+    print(f"Target Images: {len(image_paths)} images")
     print(f"Batch Size:    {args.batch_size}")
     print(f"Repeat:        {args.repeat} iterations")
+    print(f"Warmup:        {args.warmup} iterations")
 
+    # 1. Preload images into RAM
+    loaded_data = preload_images(image_paths)
+    if not loaded_data:
+        print("[ERROR] Failed to load any valid images into memory.")
+        sys.exit(1)
+    paths_only = [item[0] for item in loaded_data]
+    raw_images = [item[1] for item in loaded_data]
+    total_images = len(raw_images)
+
+    # 2. Instantiate Predictor
     predictor = OCRPredictorONNX(
         encoder_onnx=args.encoder,
         decoder_onnx=args.decoder,
         vocab_path=args.vocab,
         max_len=args.max_len,
     )
-
     print(f"Execution Providers: {predictor.providers}")
 
-    # Warmup
-    print("\nWarming up execution pipeline...")
-    warmup_subset = images[: min(len(images), args.batch_size)]
-    _ = predictor.predict_batch(warmup_subset, batch_size=args.batch_size)
+    # 3. Warmup
+    if args.warmup > 0:
+        print(f"\nWarming up execution pipeline ({args.warmup} run(s))...")
+        warmup_subset = raw_images[: min(total_images, args.batch_size)]
+        for _ in range(args.warmup):
+            _ = predictor.predict_batch(warmup_subset, batch_size=args.batch_size)
 
-    # Benchmark loop
-    print(f"\nExecuting inference across {args.repeat} iteration(s)...")
-    latencies = []
-    final_predictions = []
+    # 4. Benchmark Execution Loop
+    repeat_count = max(1, args.repeat)
+    print(f"\nExecuting benchmark inference across {repeat_count} iteration(s)...")
+    latencies: List[float] = []
+    final_predictions: List[str] = []
 
-    for r in range(args.repeat):
+    progress_step = max(1, repeat_count // 10)
+    t_start_all = time.perf_counter()
+
+    for r in range(repeat_count):
         t0 = time.perf_counter()
-        preds = predictor.predict_batch(images, batch_size=args.batch_size)
+        preds = predictor.predict_batch(raw_images, batch_size=args.batch_size)
         t1 = time.perf_counter()
         latencies.append((t1 - t0) * 1000.0)  # ms
+
         if r == 0:
             final_predictions = preds
 
-    # Print Predictions
+        # Progress reporting for high repeat runs
+        if repeat_count > 20 and ((r + 1) % progress_step == 0 or (r + 1) == repeat_count):
+            print(f"  Progress: [{r + 1}/{repeat_count}] iterations completed...")
+
+    t_total_all = time.perf_counter() - t_start_all
+
+    # 5. Print Recognition Results
     print(f"\n--- Recognition Results (ONNX Runtime) ---")
     results_dict = {}
-    for img_path, text in zip(images, final_predictions):
-        name = Path(img_path).name
+    for img_p, text in zip(paths_only, final_predictions):
+        name = Path(img_p).name
         results_dict[name] = text
         print(f"  {name:30s} -> \"{text}\"")
 
-    # Benchmark Metrics
+    # 6. Statistical Metrics Calculation
     latencies_arr = np.array(latencies)
-    total_images = len(images)
     per_img_latencies = latencies_arr / total_images
-    mean_lat = np.mean(per_img_latencies)
+    mean_lat = float(np.mean(per_img_latencies))
     fps = 1000.0 / mean_lat if mean_lat > 0 else 0.0
 
     print(f"\n=======================================================================")
-    print(f"  Performance Statistics ({args.repeat} iterations, {total_images} images/iter) ")
+    print(f"  Performance Statistics ({repeat_count} iterations, {total_images} images/iter) ")
     print(f"=======================================================================")
     print(f"  Backend:             ONNX Runtime")
+    print(f"  Total Runtime:       {t_total_all:.3f} s")
     print(f"  Mean Batch Latency:  {np.mean(latencies_arr):.2f} ms")
     print(f"  Mean Per-Image Lat:  {mean_lat:.2f} ms")
     print(f"  Median (P50) Per-Img:{np.percentile(per_img_latencies, 50):.2f} ms")
     print(f"  P90 Per-Image:       {np.percentile(per_img_latencies, 90):.2f} ms")
     print(f"  P95 Per-Image:       {np.percentile(per_img_latencies, 95):.2f} ms")
     print(f"  P99 Per-Image:       {np.percentile(per_img_latencies, 99):.2f} ms")
+    print(f"  Min / Max Per-Image: {np.min(per_img_latencies):.2f} ms / {np.max(per_img_latencies):.2f} ms")
+    print(f"  StdDev Per-Image:    {np.std(per_img_latencies):.2f} ms")
     print(f"  Throughput:          {fps:.2f} FPS")
     print(f"=======================================================================")
 
+    # 7. JSON Export
     if args.output:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "backend": "onnx",
             "total_images": total_images,
-            "repeat": args.repeat,
-            "mean_per_image_ms": round(float(mean_lat), 3),
+            "repeat": repeat_count,
+            "mean_batch_ms": round(float(np.mean(latencies_arr)), 3),
+            "mean_per_image_ms": round(mean_lat, 3),
+            "p50_per_image_ms": round(float(np.percentile(per_img_latencies, 50)), 3),
+            "p90_per_image_ms": round(float(np.percentile(per_img_latencies, 90)), 3),
+            "p95_per_image_ms": round(float(np.percentile(per_img_latencies, 95)), 3),
+            "p99_per_image_ms": round(float(np.percentile(per_img_latencies, 99)), 3),
             "fps": round(float(fps), 2),
             "predictions": results_dict,
         }
