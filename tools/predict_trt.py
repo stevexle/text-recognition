@@ -57,21 +57,20 @@ import numpy as np
 
 
 def collect_images(image_arg: Optional[str], input_dir_arg: Optional[str]) -> List[str]:
-    """Collect image paths from CLI arguments."""
+    """Collect image paths from CLI arguments. Automatically handles directories passed to --image."""
     image_paths = []
-    if image_arg:
-        p = Path(image_arg)
-        if not p.exists():
-            raise FileNotFoundError(f"Input image not found: {image_arg}")
-        image_paths.append(str(p))
+    targets = [p for p in [image_arg, input_dir_arg] if p]
 
-    if input_dir_arg:
-        p = Path(input_dir_arg)
+    for target in targets:
+        p = Path(target)
         if not p.exists():
-            raise FileNotFoundError(f"Input directory not found: {input_dir_arg}")
-        for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]:
-            image_paths.extend(glob.glob(str(p / ext)))
-            image_paths.extend(glob.glob(str(p / "**" / ext), recursive=True))
+            raise FileNotFoundError(f"Input path not found: {target}")
+        if p.is_dir():
+            for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]:
+                image_paths.extend(glob.glob(str(p / ext)))
+                image_paths.extend(glob.glob(str(p / "**" / ext), recursive=True))
+        else:
+            image_paths.append(str(p))
 
     return sorted(list(set(image_paths)))
 
