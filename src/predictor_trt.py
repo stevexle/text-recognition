@@ -188,7 +188,7 @@ class OCRPredictorTRT:
             self._cached_batch_size = b
             self._gpu_image = torch.empty(target_shape, dtype=torch.float32, device=self.device)
             self._gpu_enc_memory = torch.empty((b, 256, 384), dtype=torch.float32, device=self.device)
-            self._gpu_logits_buffer = torch.empty((b, self.max_len, self.vocab_size), dtype=torch.float32, device=self.device)
+            self._gpu_logits_raw = torch.empty((b * self.max_len * self.vocab_size,), dtype=torch.float32, device=self.device)
             try:
                 self._host_image_pinned = torch.empty(target_shape, dtype=torch.float32, pin_memory=True)
             except Exception:
@@ -232,28 +232,32 @@ class OCRPredictorTRT:
             # 2. Autoregressive token generation loop
             for step in range(self.max_len - 1):
                 cur_len = current_tokens.shape[1]
-                # Slice preallocated contiguous logits view: [batch_size, cur_len, vocab_size]
-                logits_view = self._gpu_logits_buffer[:batch_size, :cur_len, :]
+                num_elem = batch_size * cur_len * self.vocab_size
+                # Guarantee 100% contiguous memory layout matching TensorRT output buffer
+                logits_out = self._gpu_logits_raw[:num_elem].view(batch_size, cur_len, self.vocab_size)
 
                 # Update dynamic token shape and binding pointers
                 if hasattr(self.decoder_ctx, "set_input_shape"):
                     self.decoder_ctx.set_input_shape(self.dec_tgt_name, (batch_size, cur_len))
                     self.decoder_ctx.set_tensor_address(self.dec_tgt_name, current_tokens.data_ptr())
-                    self.decoder_ctx.set_tensor_address(self.dec_output_name, logits_view.data_ptr())
+                    self.decoder_ctx.set_tensor_address(self.dec_output_name, logits_out.data_ptr())
                     self.decoder_ctx.execute_async_v3(stream_handle=self.stream.cuda_stream)
                 else:
                     bindings = [
                         int(current_tokens.data_ptr()),
                         int(memory.data_ptr()),
-                        int(logits_view.data_ptr()),
+                        int(logits_out.data_ptr()),
                     ]
                     self.decoder_ctx.set_binding_shape(0, (batch_size, cur_len))
                     self.decoder_ctx.set_binding_shape(1, (batch_size, 256, 384))
                     self.decoder_ctx.execute_async_v2(bindings=bindings, stream_handle=self.stream.cuda_stream)
 
                 # Last token logits -> greedy argmax on GPU
-                last_logits = logits_view[:, -1, :]  # [B, vocab_size]
+                last_logits = logits_out[:, -1, :]  # [B, vocab_size]
                 next_token = torch.argmax(last_logits, dim=-1, keepdim=True)  # [B, 1]
+
+                # Mask already finished batch items with pad_id
+                next_token[finished.unsqueeze(1)] = self.tokenizer.pad_id
 
                 # Update finished status
                 is_eos = (next_token.squeeze(1) == self.tokenizer.eos_id)
