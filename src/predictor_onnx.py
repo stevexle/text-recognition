@@ -5,6 +5,7 @@ Executes Encoder & Decoder entirely via ONNX Runtime with hardware acceleration
 (CUDAExecutionProvider / CoreMLExecutionProvider / CPUExecutionProvider).
 Supports single image, vectorized batch inference, and asynchronous ASGI prediction.
 Features:
+  - Auto-detection and pre-registration of NVIDIA CUDA & cuDNN shared libraries on Linux.
   - Fused in-place zero-allocation image preprocessing directly into batch buffers.
   - Preallocated token buffers eliminating array reallocations during decoding.
   - Encoder run once per batch; vectorized autoregressive greedy decoder loop.
@@ -13,7 +14,42 @@ Features:
 import asyncio
 import os
 from pathlib import Path
+import sys
 from typing import List, Optional, Sequence, Union
+
+# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
+# MUST be executed BEFORE importing onnxruntime
+if sys.platform == "linux":
+    import ctypes
+    import site
+    try:
+        for site_pkg in site.getsitepackages():
+            nvidia_dir = os.path.join(site_pkg, "nvidia")
+            if os.path.isdir(nvidia_dir):
+                for sub in ["cuda_runtime", "cublas", "cudnn", "cufft", "curand", "tensorrt"]:
+                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
+                    if os.path.isdir(lib_dir):
+                        if "LD_LIBRARY_PATH" in os.environ:
+                            if lib_dir not in os.environ["LD_LIBRARY_PATH"]:
+                                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{os.environ['LD_LIBRARY_PATH']}"
+                        else:
+                            os.environ["LD_LIBRARY_PATH"] = lib_dir
+                        for f in sorted(os.listdir(lib_dir)):
+                            if f.endswith(".so") or ".so." in f:
+                                try:
+                                    ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
+                                except Exception:
+                                    pass
+            trt_dir = os.path.join(site_pkg, "tensorrt")
+            if os.path.isdir(trt_dir):
+                for f in sorted(os.listdir(trt_dir)):
+                    if f.endswith(".so") or ".so." in f:
+                        try:
+                            ctypes.CDLL(os.path.join(trt_dir, f), mode=ctypes.RTLD_GLOBAL)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
 
 import cv2
 import numpy as np
@@ -56,10 +92,10 @@ class OCRPredictorONNX:
             raise FileNotFoundError(f"Decoder ONNX model not found: {self.decoder_path}")
 
         self.encoder_sess = ort.InferenceSession(
-            str(self.encoder_path), sess_options=sess_opts, providers=self.providers
+            str(self.encoder_path), sess_opts, providers=self.providers
         )
         self.decoder_sess = ort.InferenceSession(
-            str(self.decoder_path), sess_options=sess_opts, providers=self.providers
+            str(self.decoder_path), sess_opts, providers=self.providers
         )
 
         # 4. Cache Input & Output Node Names
@@ -72,7 +108,6 @@ class OCRPredictorONNX:
         self.dec_output_name = self.decoder_sess.get_outputs()[0].name
 
         # 5. Pre-computed ImageNet Normalization Constants
-        # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
         self.scale = 1.0 / (255.0 * std)
@@ -86,10 +121,16 @@ class OCRPredictorONNX:
         selected = []
 
         if "CUDAExecutionProvider" in available:
-            selected.append("CUDAExecutionProvider")
+            # Check CUDA provider options
+            cuda_options = {
+                "device_id": 0,
+                "arena_extend_strategy": "kNextPowerOfTwo",
+                "gpu_mem_limit": 2 * 1024 * 1024 * 1024,  # 2 GB
+                "cudnn_conv_algo_search": "EXHAUSTIVE",
+                "do_copy_in_default_stream": True,
+            }
+            selected.append(("CUDAExecutionProvider", cuda_options))
 
-        # Note: CoreMLExecutionProvider on macOS has limitations with dynamic batching > 1,
-        # so CPUExecutionProvider is preferred for reliable high-throughput batching on Darwin.
         selected.append("CPUExecutionProvider")
         return selected
 
