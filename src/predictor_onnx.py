@@ -1,12 +1,10 @@
 """
 High-Performance ONNX Runtime OCR Predictor for ViT-Transformer Text Recognition.
 
-Executes Encoder & Decoder entirely via ONNX Runtime with hardware acceleration
-(CUDAExecutionProvider / CoreMLExecutionProvider / CPUExecutionProvider).
-Supports single image, vectorized batch inference, and asynchronous ASGI prediction.
+Executes Encoder & Decoder via ONNX Runtime with hardware acceleration
+(CUDAExecutionProvider / CPUExecutionProvider).
 Features:
   - Exact match with PyTorch training transforms (PIL Bilinear with anti-aliasing + mean=0.5, std=0.5).
-  - Auto-detection and pre-registration of NVIDIA CUDA & cuDNN shared libraries on Linux.
   - Fused in-place zero-allocation image preprocessing directly into batch buffers.
   - Preallocated token buffers eliminating array reallocations during decoding.
   - Encoder run once per batch; vectorized autoregressive greedy decoder loop up to max_len=256.
@@ -15,38 +13,7 @@ Features:
 import asyncio
 import os
 from pathlib import Path
-import sys
 from typing import List, Optional, Sequence, Union
-
-# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-# In strict dependency order: libcudart -> libcublasLt -> libcublas -> libcudnn
-if sys.platform == "linux":
-    import ctypes
-    import site
-    try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
-                order = [
-                    ("cuda_runtime", ["libcudart"]),
-                    ("cublas", ["libcublasLt", "libcublas"]),
-                    ("cudnn", ["libcudnn"]),
-                    ("cufft", ["libcufft"]),
-                    ("curand", ["libcurand"]),
-                    ("tensorrt", ["libnvinfer"]),
-                ]
-                for sub, prefixes in order:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        for prefix in prefixes:
-                            for f in os.listdir(lib_dir):
-                                if f.startswith(prefix) and (".so" in f):
-                                    try:
-                                        ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                    except Exception:
-                                        pass
-    except Exception:
-        pass
 
 import numpy as np
 import onnxruntime as ort
@@ -116,14 +83,7 @@ class OCRPredictorONNX:
         selected = []
 
         if "CUDAExecutionProvider" in available:
-            cuda_options = {
-                "device_id": 0,
-                "arena_extend_strategy": "kNextPowerOfTwo",
-                "gpu_mem_limit": 2 * 1024 * 1024 * 1024,
-                "cudnn_conv_algo_search": "EXHAUSTIVE",
-                "do_copy_in_default_stream": True,
-            }
-            selected.append(("CUDAExecutionProvider", cuda_options))
+            selected.append("CUDAExecutionProvider")
 
         selected.append("CPUExecutionProvider")
         return selected

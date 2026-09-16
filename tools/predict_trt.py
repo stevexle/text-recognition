@@ -2,9 +2,8 @@
 Production NVIDIA TensorRT Text Recognition Inference & Benchmarking CLI Tool.
 
 Features:
-  - Sub-20ms batch inference via compiled TensorRT FP16 engines (.engine).
+  - Sub-15ms batch inference via compiled TensorRT FP16 engines (.engine).
   - Pre-loads images into RAM to isolate pure TensorRT execution latency from disk I/O.
-  - Automatic fallback to ONNX Runtime if running without CUDA / TensorRT GPU environment.
   - Comprehensive statistical profiling: Latency (Mean, P50, P90, P95, P99, Min, Max, StdDev), Throughput (FPS).
   - Configurable repeat iterations (--repeat N) for stress testing with throttled progress output.
   - Standardized JSON results export.
@@ -19,38 +18,10 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-# In strict dependency order: libcudart -> libcublasLt -> libcublas -> libcudnn
-if sys.platform == "linux":
-    import ctypes
-    import site
-    try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
-                order = [
-                    ("cuda_runtime", ["libcudart"]),
-                    ("cublas", ["libcublasLt", "libcublas"]),
-                    ("cudnn", ["libcudnn"]),
-                    ("cufft", ["libcufft"]),
-                    ("curand", ["libcurand"]),
-                    ("tensorrt", ["libnvinfer"]),
-                ]
-                for sub, prefixes in order:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        for prefix in prefixes:
-                            for f in os.listdir(lib_dir):
-                                if f.startswith(prefix) and (".so" in f):
-                                    try:
-                                        ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                    except Exception:
-                                        pass
-    except Exception:
-        pass
-
-import cv2
 import numpy as np
+from PIL import Image
+
+from src.predictor_trt import OCRPredictorTRT
 
 
 def collect_images(image_arg: Optional[str], input_dir_arg: Optional[str]) -> List[str]:
@@ -72,72 +43,23 @@ def collect_images(image_arg: Optional[str], input_dir_arg: Optional[str]) -> Li
     return sorted(list(set(image_paths)))
 
 
-def preload_images(image_paths: List[str]) -> List[Tuple[str, np.ndarray]]:
+def preload_images(image_paths: List[str]) -> List[Tuple[str, Image.Image]]:
     """Pre-load images into RAM to isolate pure inference latency from disk I/O."""
     loaded = []
     for p in image_paths:
-        img = cv2.imread(p)
-        if img is not None:
-            loaded.append((p, img))
-        else:
-            print(f"[WARNING] Skipping unreadable image: {p}")
-    return loaded
-
-
-def create_predictor(
-    encoder_path: str,
-    decoder_path: str,
-    vocab_path: str,
-    max_len: int = 64,
-):
-    """Instantiate TensorRT predictor, or fall back to ONNX Runtime if engine files not present."""
-    is_trt = encoder_path.endswith(".engine") and decoder_path.endswith(".engine")
-
-    if is_trt:
         try:
-            import torch
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is not available for TensorRT.")
-            from src.predictor_trt import OCRPredictorTRT
-            print(f"[INFO] Initializing Native NVIDIA TensorRT Predictor:")
-            print(f"       Encoder: {encoder_path}")
-            print(f"       Decoder: {decoder_path}")
-            return OCRPredictorTRT(
-                encoder_engine=encoder_path,
-                decoder_engine=decoder_path,
-                vocab_path=vocab_path,
-                max_len=max_len,
-            ), "tensorrt"
+            img = Image.open(p).convert("RGB")
+            loaded.append((p, img))
         except Exception as e:
-            print(f"[WARNING] Failed to initialize TensorRT runner ({e}). Falling back to ONNX Runtime.")
-
-    from src.predictor_onnx import OCRPredictorONNX
-    # Auto-adjust filenames if .engine paths were provided as default but only .onnx exists
-    if encoder_path.endswith(".engine") and not Path(encoder_path).exists():
-        fallback_enc = encoder_path.replace(".engine", ".onnx").replace("tensorrt", "onnx")
-        if Path(fallback_enc).exists():
-            encoder_path = fallback_enc
-    if decoder_path.endswith(".engine") and not Path(decoder_path).exists():
-        fallback_dec = decoder_path.replace(".engine", ".onnx").replace("tensorrt", "onnx")
-        if Path(fallback_dec).exists():
-            decoder_path = fallback_dec
-
-    print(f"[INFO] Initializing ONNX Runtime Predictor:")
-    print(f"       Encoder: {encoder_path}")
-    print(f"       Decoder: {decoder_path}")
-    return OCRPredictorONNX(
-        encoder_onnx=encoder_path,
-        decoder_onnx=decoder_path,
-        vocab_path=vocab_path,
-        max_len=max_len,
-    ), "onnx"
+            print(f"[WARNING] Skipping unreadable image: {p} ({e})")
+    return loaded
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark and Predict Text Recognition via TensorRT / ONNX"
+        description="Benchmark and Predict Text Recognition via NVIDIA TensorRT"
     )
-    parser.add_argument("--image", type=str, help="Path to a single cropped text image")
+    parser.add_argument("--image", type=str, help="Path to a single cropped text image or directory")
     parser.add_argument(
         "--input-dir",
         type=str,
@@ -148,13 +70,13 @@ def main():
         "--encoder",
         type=str,
         default="weights/tensorrt/encoder.engine",
-        help="Path to compiled encoder.engine or encoder.onnx",
+        help="Path to compiled encoder.engine (default: weights/tensorrt/encoder.engine)",
     )
     parser.add_argument(
         "--decoder",
         type=str,
         default="weights/tensorrt/decoder.engine",
-        help="Path to compiled decoder.engine or decoder.onnx",
+        help="Path to compiled decoder.engine (default: weights/tensorrt/decoder.engine)",
     )
     parser.add_argument(
         "--vocab",
@@ -163,7 +85,7 @@ def main():
         help="Path to vocabulary JSON file (default: checkpoints/vocab.json)",
     )
     parser.add_argument("--batch-size", type=int, default=16, help="Inference batch size (default: 16)")
-    parser.add_argument("--max-len", type=int, default=256, help="Maximum generated sequence length (default: 64)")
+    parser.add_argument("--max-len", type=int, default=256, help="Maximum generated sequence length (default: 256)")
     parser.add_argument(
         "--warmup",
         type=int,
@@ -188,12 +110,14 @@ def main():
         sys.exit(1)
 
     print(f"\n=======================================================================")
-    print(f"  ViT-Transformer Text Recognition Inference & Benchmark Engine        ")
+    print(f"  ViT-Transformer Text Recognition (NVIDIA TensorRT Engine)            ")
     print(f"=======================================================================")
-    print(f"Target Images: {len(image_paths)} images")
-    print(f"Batch Size:    {args.batch_size}")
-    print(f"Repeat:        {args.repeat} iterations")
-    print(f"Warmup:        {args.warmup} iterations")
+    print(f"Encoder Engine: {args.encoder}")
+    print(f"Decoder Engine: {args.decoder}")
+    print(f"Target Images:  {len(image_paths)} images")
+    print(f"Batch Size:     {args.batch_size}")
+    print(f"Repeat:         {args.repeat} iterations")
+    print(f"Warmup:         {args.warmup} iterations")
 
     # 1. Preload images into RAM
     loaded_data = preload_images(image_paths)
@@ -204,10 +128,10 @@ def main():
     raw_images = [item[1] for item in loaded_data]
     total_images = len(raw_images)
 
-    # 2. Initialize Predictor
-    predictor, backend = create_predictor(
-        encoder_path=args.encoder,
-        decoder_path=args.decoder,
+    # 2. Initialize TensorRT Predictor
+    predictor = OCRPredictorTRT(
+        encoder_engine=args.encoder,
+        decoder_engine=args.decoder,
         vocab_path=args.vocab,
         max_len=args.max_len,
     )
@@ -237,14 +161,13 @@ def main():
         if r == 0:
             final_predictions = preds
 
-        # Progress reporting for high repeat runs
         if repeat_count > 20 and ((r + 1) % progress_step == 0 or (r + 1) == repeat_count):
             print(f"  Progress: [{r + 1}/{repeat_count}] iterations completed...")
 
     t_total_all = time.perf_counter() - t_start_all
 
     # 5. Print Recognition Results
-    print(f"\n--- Recognition Results (Backend: {backend.upper()}) ---")
+    print(f"\n--- Recognition Results (Backend: TENSORRT) ---")
     results_dict = {}
     for img_p, text in zip(paths_only, final_predictions):
         name = Path(img_p).name
@@ -260,7 +183,7 @@ def main():
     print(f"\n=======================================================================")
     print(f"  Performance Statistics ({repeat_count} iterations, {total_images} images/iter) ")
     print(f"=======================================================================")
-    print(f"  Backend:             {backend.upper()}")
+    print(f"  Backend:             TENSORRT")
     print(f"  Total Runtime:       {t_total_all:.3f} s")
     print(f"  Mean Batch Latency:  {np.mean(latencies_arr):.2f} ms")
     print(f"  Mean Per-Image Lat:  {mean_lat:.2f} ms")
@@ -278,7 +201,7 @@ def main():
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "backend": backend,
+            "backend": "tensorrt",
             "total_images": total_images,
             "repeat": repeat_count,
             "mean_batch_ms": round(float(np.mean(latencies_arr)), 3),

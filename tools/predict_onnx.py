@@ -3,7 +3,7 @@ Production ONNX Runtime Text Recognition Inference & Benchmarking CLI Tool.
 
 Features:
   - Single image, list of images, or recursive directory inference.
-  - Multi-threaded CPU / GPU (CUDA) / Apple Silicon (CoreML) hardware acceleration.
+  - Multi-threaded CPU / GPU (CUDA) hardware acceleration.
   - Pre-loads images into RAM to isolate pure model inference throughput from disk I/O.
   - Comprehensive statistical profiling: Latency (Mean, P50, P90, P95, P99, Min, Max, StdDev), Throughput (FPS).
   - Configurable repeat iterations (--repeat N) for stress testing with throttled progress output.
@@ -19,38 +19,8 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-# In strict dependency order: libcudart -> libcublasLt -> libcublas -> libcudnn
-if sys.platform == "linux":
-    import ctypes
-    import site
-    try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
-                order = [
-                    ("cuda_runtime", ["libcudart"]),
-                    ("cublas", ["libcublasLt", "libcublas"]),
-                    ("cudnn", ["libcudnn"]),
-                    ("cufft", ["libcufft"]),
-                    ("curand", ["libcurand"]),
-                    ("tensorrt", ["libnvinfer"]),
-                ]
-                for sub, prefixes in order:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        for prefix in prefixes:
-                            for f in os.listdir(lib_dir):
-                                if f.startswith(prefix) and (".so" in f):
-                                    try:
-                                        ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                    except Exception:
-                                        pass
-    except Exception:
-        pass
-
-import cv2
 import numpy as np
+from PIL import Image
 
 from src.predictor_onnx import OCRPredictorONNX
 
@@ -74,15 +44,15 @@ def collect_images(image_arg: Optional[str], input_dir_arg: Optional[str]) -> Li
     return sorted(list(set(image_paths)))
 
 
-def preload_images(image_paths: List[str]) -> List[Tuple[str, np.ndarray]]:
+def preload_images(image_paths: List[str]) -> List[Tuple[str, Image.Image]]:
     """Pre-load images into RAM to isolate pure inference latency from disk I/O."""
     loaded = []
     for p in image_paths:
-        img = cv2.imread(p)
-        if img is not None:
+        try:
+            img = Image.open(p).convert("RGB")
             loaded.append((p, img))
-        else:
-            print(f"[WARNING] Skipping unreadable image: {p}")
+        except Exception as e:
+            print(f"[WARNING] Skipping unreadable image: {p} ({e})")
     return loaded
 
 
@@ -90,7 +60,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Benchmark and Predict Text Recognition via ONNX Runtime"
     )
-    parser.add_argument("--image", type=str, help="Path to a single cropped text image")
+    parser.add_argument("--image", type=str, help="Path to a single cropped text image or directory")
     parser.add_argument(
         "--input-dir",
         type=str,
@@ -116,7 +86,7 @@ def main():
         help="Path to vocabulary JSON file (default: checkpoints/vocab.json)",
     )
     parser.add_argument("--batch-size", type=int, default=16, help="Inference batch size (default: 16)")
-    parser.add_argument("--max-len", type=int, default=256, help="Maximum sequence length (default: 64)")
+    parser.add_argument("--max-len", type=int, default=256, help="Maximum sequence length (default: 256)")
     parser.add_argument(
         "--warmup",
         type=int,
@@ -193,7 +163,6 @@ def main():
         if r == 0:
             final_predictions = preds
 
-        # Progress reporting for high repeat runs
         if repeat_count > 20 and ((r + 1) % progress_step == 0 or (r + 1) == repeat_count):
             print(f"  Progress: [{r + 1}/{repeat_count}] iterations completed...")
 

@@ -16,38 +16,7 @@ Features:
 import asyncio
 import os
 from pathlib import Path
-import sys
 from typing import List, Optional, Sequence, Tuple, Union
-
-# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-# In strict dependency order: libcudart -> libcublasLt -> libcublas -> libcudnn
-if sys.platform == "linux":
-    import ctypes
-    import site
-    try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
-                order = [
-                    ("cuda_runtime", ["libcudart"]),
-                    ("cublas", ["libcublasLt", "libcublas"]),
-                    ("cudnn", ["libcudnn"]),
-                    ("cufft", ["libcufft"]),
-                    ("curand", ["libcurand"]),
-                    ("tensorrt", ["libnvinfer"]),
-                ]
-                for sub, prefixes in order:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        for prefix in prefixes:
-                            for f in os.listdir(lib_dir):
-                                if f.startswith(prefix) and (".so" in f):
-                                    try:
-                                        ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                    except Exception:
-                                        pass
-    except Exception:
-        pass
 
 import numpy as np
 from PIL import Image

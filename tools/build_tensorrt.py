@@ -16,39 +16,6 @@ import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
 
-# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-if sys.platform == "linux":
-    import ctypes
-    import site
-    try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
-                for sub in ["cuda_runtime", "cublas", "cudnn", "cufft", "curand", "tensorrt"]:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        if "LD_LIBRARY_PATH" in os.environ:
-                            if lib_dir not in os.environ["LD_LIBRARY_PATH"]:
-                                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{os.environ['LD_LIBRARY_PATH']}"
-                        else:
-                            os.environ["LD_LIBRARY_PATH"] = lib_dir
-                        for f in sorted(os.listdir(lib_dir)):
-                            if f.endswith(".so") or ".so." in f:
-                                try:
-                                    ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                except Exception:
-                                    pass
-            trt_dir = os.path.join(site_pkg, "tensorrt")
-            if os.path.isdir(trt_dir):
-                for f in sorted(os.listdir(trt_dir)):
-                    if f.endswith(".so") or ".so." in f:
-                        try:
-                            ctypes.CDLL(os.path.join(trt_dir, f), mode=ctypes.RTLD_GLOBAL)
-                        except Exception:
-                            pass
-    except Exception:
-        pass
-
 # Dynamic Shape Profiles for ViT-Transformer Recognition
 SHAPE_PROFILES = {
     "encoder": {
