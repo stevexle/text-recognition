@@ -146,3 +146,77 @@ text_recognition/
 Detailed architectural breakdowns, step-by-step tensor dimension transformations, and 2D schematic diagrams are available in the [`docs/`](docs/) directory:
 
 - [docs/vit_transformer_architecture.md](docs/vit_transformer_architecture.md)
+
+---
+
+## 🚀 High-Performance Inference: ONNX Runtime & NVIDIA TensorRT
+
+For high-throughput, low-latency production serving (FastAPI, Triton Inference Server, embedded edge devices), the Sequence-to-Sequence ViT-Transformer model is split into two accelerated sub-models:
+1. **Encoder** (`weights/onnx/encoder.onnx` / `weights/tensorrt/encoder.engine`): Run **once** per batch of cropped text images.
+   - Input: `image` $[B, 3, 32, 256]$
+   - Output: `memory` $[B, 256, 384]$
+2. **Decoder** (`weights/onnx/decoder.onnx` / `weights/tensorrt/decoder.engine`): Vectorized autoregressive greedy loop running entirely in accelerated device memory.
+   - Inputs: `tgt_tokens` $[B, L]$ (int64), `memory` $[B, 256, 384]$ (float32)
+   - Output: `logits` $[B, L, 229]$
+
+### 1. Export PyTorch to ONNX
+
+Export and verify numerical accuracy against the PyTorch checkpoint (`checkpoints/best_model.pt`):
+
+```bash
+uv run python tools/export_onnx.py
+```
+
+*Note: The exporter automatically patches the decoder with `DynamicMultiheadAttention` to guarantee full dynamic batch ($B$) and dynamic sequence length ($1 \le L \le 256$) compatibility.*
+
+### 2. Compile NVIDIA TensorRT FP16 Engines
+
+To compile ultra-fast FP16 TensorRT engines with dynamic shape profiles:
+
+```bash
+# Automated bash script (checks GPU, virtual environment, and builds engines):
+bash tools/build_tensorrt.sh
+
+# Or via unified Python builder CLI:
+uv run python tools/build_tensorrt.py --model all --fp16
+```
+
+### 3. Run Inference & Latency Benchmarks (`--repeat N`)
+
+Run batch inference with latency profiling (P50, P90, P95, P99, FPS):
+
+```bash
+# Benchmark with repeat iterations:
+uv run python tools/predict_trt.py --repeat 10
+
+# Predict a single cropped image:
+uv run python tools/predict_trt.py --image test/cropped/ho_va_ten.jpg
+
+# Predict an entire folder and export results to JSON:
+uv run python tools/predict_trt.py --input-dir test/cropped/ --output results.json
+```
+
+### 4. Python Integration
+
+```python
+# ONNX Runtime:
+from src.predictor_onnx import OCRPredictorONNX
+
+predictor = OCRPredictorONNX(
+    encoder_onnx="weights/onnx/encoder.onnx",
+    decoder_onnx="weights/onnx/decoder.onnx",
+    vocab_path="checkpoints/vocab.json"
+)
+text = predictor.predict("test/cropped/ho_va_ten.jpg")
+batch_texts = predictor.predict_batch(["img1.jpg", "img2.jpg"], batch_size=16)
+
+# Native NVIDIA TensorRT (GPU):
+from src.predictor_trt import OCRPredictorTRT
+
+trt_predictor = OCRPredictorTRT(
+    encoder_engine="weights/tensorrt/encoder.engine",
+    decoder_engine="weights/tensorrt/decoder.engine",
+    vocab_path="checkpoints/vocab.json"
+)
+text = trt_predictor.predict("test/cropped/ho_va_ten.jpg")
+```

@@ -28,3 +28,8 @@ wandb/
 test/cccd*.jpg
 test/cropped/
 
+
+# Model weights & compiled engines
+weights/
+*.engine
+*.plan

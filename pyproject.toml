@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     { name = "steve", email = "Ltien540@gmail.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "albumentations>=1.4.0",
     "datasets>=2.18.0",
@@ -27,6 +27,14 @@ dependencies = [
     "transformers>=4.38.0",
     "vietocr>=0.3.12",
     "wandb>=0.16.0",
+    "onnx>=1.15.0",
+    "onnxruntime>=1.17.0; sys_platform == 'darwin'",
+    "onnxruntime-gpu>=1.17.0; sys_platform == 'linux'",
+    "onnxslim>=0.1.34",
+    "tensorrt-cu12>=10.0.0; sys_platform == 'linux'",
+    "tensorrt-cu12-bindings>=10.0.0; sys_platform == 'linux'",
+    "tensorrt-cu12-libs>=10.0.0; sys_platform == 'linux'",
+    "onnxscript>=0.7.2",
 ]
 
 [tool.setuptools.packages.find]
