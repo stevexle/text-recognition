@@ -20,35 +20,27 @@ import time
 from typing import List, Optional, Tuple
 
 # Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
-if sys.platform == "linux":
-    import ctypes
+# MUST be executed BEFORE importing onnxruntime or torch
+if sys.platform == "linux" and "ORT_CUDA_LOADED" not in os.environ:
     import site
+    extra_dirs = []
     try:
-        for site_pkg in site.getsitepackages():
-            nvidia_dir = os.path.join(site_pkg, "nvidia")
-            if os.path.isdir(nvidia_dir):
+        for sp in site.getsitepackages():
+            nv = os.path.join(sp, "nvidia")
+            if os.path.isdir(nv):
                 for sub in ["cuda_runtime", "cublas", "cudnn", "cufft", "curand", "tensorrt"]:
-                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
-                    if os.path.isdir(lib_dir):
-                        if "LD_LIBRARY_PATH" in os.environ:
-                            if lib_dir not in os.environ["LD_LIBRARY_PATH"]:
-                                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{os.environ['LD_LIBRARY_PATH']}"
-                        else:
-                            os.environ["LD_LIBRARY_PATH"] = lib_dir
-                        for f in sorted(os.listdir(lib_dir)):
-                            if f.endswith(".so") or ".so." in f:
-                                try:
-                                    ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
-                                except Exception:
-                                    pass
-            trt_dir = os.path.join(site_pkg, "tensorrt")
-            if os.path.isdir(trt_dir):
-                for f in sorted(os.listdir(trt_dir)):
-                    if f.endswith(".so") or ".so." in f:
-                        try:
-                            ctypes.CDLL(os.path.join(trt_dir, f), mode=ctypes.RTLD_GLOBAL)
-                        except Exception:
-                            pass
+                    d = os.path.join(nv, sub, "lib")
+                    if os.path.isdir(d):
+                        extra_dirs.append(d)
+        if extra_dirs:
+            current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+            new_ld = ":".join(extra_dirs + ([current_ld] if current_ld else []))
+            os.environ["LD_LIBRARY_PATH"] = new_ld
+            os.environ["ORT_CUDA_LOADED"] = "1"
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                pass
     except Exception:
         pass
 
